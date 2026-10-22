@@ -40,6 +40,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - A Redis client that is still connecting is treated as unavailable (cache bypass) instead of a `500`.
 - k6 load test treats `409` as an expected response.
 
+### Documentation
+
+- README rewritten for the delivery: quick start, API and error codes, how it works, decisions and trade-offs,
+  observability (logs, metrics, traces, SLOs, alerts, dashboard, Datadog mapping), tests, measured
+  verification results, simplifications and limitations.
+- ADRs 0006 (storefront cache), 0007 (invoicing lease, DLQ settlement, reconciliation), 0008 (trace export).
+- DLQ runbook updated for automatic dead-letter settlement; architecture flow and order states updated.
+- `PROMPTS.md` entries 3–7.
+
 ## [0.1.0] - 2026-10-22
 
 ### Added

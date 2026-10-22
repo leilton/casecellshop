@@ -13,7 +13,7 @@ overload the ERP, oversell stock or create duplicate invoices.
 | `api`                                          | `GET /products` (cached), `POST /checkout` (reserve + enqueue), `GET /orders/:id/status`, `/metrics` |
 | `worker`                                       | Outbox relay → SQS, SQS consumer → ERP invoicing with retry/lookup, DLQ handling, reconciliation     |
 | Postgres                                       | Shop-owned data: storefront read model, inventory/reservations, orders, outbox, order events         |
-| Redis                                          | Storefront cache, single-flight locks, idempotency fast path                                         |
+| Redis                                          | Storefront cache and single-flight locks (idempotency lives in Postgres, ADR 0005)                   |
 | SQS (ElasticMQ)                                | `checkout-orders` queue + `checkout-orders-dlq` (redrive after 5 receives)                           |
 | ERP mock                                       | Simulates latency, 5xx, timeouts and non-idempotent invoicing                                        |
 | OTel Collector → Jaeger / Prometheus / Grafana | Traces, metrics, alerts (Datadog stand-in)                                                           |
@@ -37,13 +37,15 @@ sequenceDiagram
   W->>Q: SendMessage(orderId)
   W->>P: set published_at
   Q->>W: ReceiveMessage
-  W->>E: GET /invoices?orderId= (already invoiced?)
+  W->>P: take invoicing lease (concurrent duplicate delivery backs off)
+  W->>E: GET /invoices?orderId= (attempt > 1: already invoiced?)
   alt not invoiced
     W->>E: POST /invoices (timeout, backoff + jitter)
   end
   W->>P: status INVOICED + order_event; COMMIT
   W->>Q: DeleteMessage
-  Note over Q,W: after 5 failed receives → DLQ → order FAILED, reservation released
+  Note over Q,W: retryable failure → ChangeMessageVisibility (backoff + full jitter)
+  Note over Q,W: after 5 receives → DLQ → worker looks up once more → INVOICED, or FAILED + stock released
 ```
 
 ## Order states
@@ -51,11 +53,11 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
   [*] --> RESERVED: stock reserved
-  RESERVED --> INVOICING: worker picks message
-  INVOICING --> INVOICED: ERP invoice confirmed
+  RESERVED --> INVOICING: worker picks message (lease)
+  INVOICING --> INVOICED: ERP invoice created or adopted
   INVOICING --> INVOICING: retry (lookup first)
-  INVOICING --> FAILED: DLQ / attempts exhausted
-  RESERVED --> CANCELLED: reservation expired (reconciliation)
+  INVOICING --> FAILED: DLQ settlement or ERP 4xx — stock released
+  RESERVED --> CANCELLED: reservation expired without invoice (reconciliation) — stock released
   FAILED --> [*]
   INVOICED --> [*]
   CANCELLED --> [*]
@@ -70,6 +72,14 @@ stateDiagram-v2
 - **Stale-if-error:** if the ERP fails, serve the last value for up to `CACHE_STALE_IF_ERROR_S` and count
   `cache_requests_total{result="stale"}`.
 - Displayed stock is advisory; the authoritative check is the reservation in Postgres.
+- **Invalidation:** the worker polls the ERP catalog every `CATALOG_SYNC_INTERVAL_MS`; a higher `version` updates
+  the read model (checkout prices) and evicts the cache entry ([ADR 0006](adr/0006-storefront-cache.md)).
+
+## Reconciliation
+
+Every `RECONCILE_INTERVAL_MS` the worker re-checks against the ERP: expired `RESERVED` orders with no invoice
+are cancelled and their stock released; `INVOICING` orders idle for `INVOICING_STUCK_AFTER_S` adopt the ERP
+invoice if one exists ([ADR 0007](adr/0007-invoicing-lease-and-dlq-settlement.md)).
 
 ## Decisions
 
