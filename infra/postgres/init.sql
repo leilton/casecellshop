@@ -38,7 +38,10 @@ CREATE TABLE orders (
   correlation_id   TEXT,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  reserved_until   TIMESTAMPTZ                -- reservation expiry (reconciliation releases it)
+  reserved_until   TIMESTAMPTZ,   -- reservation expiry (reconciliation releases it)
+  -- Short lease taken by the worker while it calls the ERP: a concurrent duplicate delivery backs off
+  -- instead of looking up (finding nothing yet) and creating a second invoice.
+  invoicing_lease_until TIMESTAMPTZ
 );
 CREATE INDEX orders_status_updated_idx ON orders (status, updated_at);
 

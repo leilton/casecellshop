@@ -27,11 +27,12 @@ x-app-env: &app-env
   ERP_BASE_URL: http://erp-mock:4000
   ERP_TIMEOUT_MS: ${ERP_TIMEOUT_MS:-2000}
   # Cache
-  CACHE_TTL_CATALOG_S: ${CACHE_TTL_CATALOG_S:-300}
   CACHE_TTL_PRICE_S: ${CACHE_TTL_PRICE_S:-60}
   CACHE_TTL_STOCK_S: ${CACHE_TTL_STOCK_S:-5}
   CACHE_STALE_IF_ERROR_S: ${CACHE_STALE_IF_ERROR_S:-120}
-  # Telemetry (OpenTelemetry → collector). Without the obs profile the SDK only fails to export; the app keeps running.
+  # Telemetry (OpenTelemetry → collector).
+  # `none` unless the obs profile runs (make obs sets otlp): exporting to a missing collector starves DNS lookups.
+  OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
   OTEL_RESOURCE_ATTRIBUTES: deployment.environment=local,service.version=0.1.0
 
@@ -48,6 +49,9 @@ services:
     volumes:
       - ./src:/app/src
       - ./tests:/app/tests
+      - ./docs:/app/docs:ro
+      - ./vitest.config.ts:/app/vitest.config.ts:ro
+      - ./infra/postgres:/app/infra/postgres:ro # tests build an isolated shop_test database from it
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
