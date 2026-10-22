@@ -41,6 +41,21 @@ export const checkoutAcceptedSchema = z.object({
 });
 export type CheckoutAccepted = z.infer<typeof checkoutAcceptedSchema>;
 
+/** One SKU that could not be reserved, with what is left so the storefront can offer "only 2 left". */
+export const stockShortageSchema = z.object({
+  sku: z.string(),
+  requested: z.number().int().positive(),
+  available: z.number().int().nonnegative(),
+});
+export type StockShortage = z.infer<typeof stockShortageSchema>;
+
+/** `details` of a `409 OUT_OF_STOCK`; `skus` is kept for clients written before `items` existed. */
+export const outOfStockDetailsSchema = z.object({
+  skus: z.array(z.string()),
+  items: z.array(stockShortageSchema),
+});
+export type OutOfStockDetails = z.infer<typeof outOfStockDetailsSchema>;
+
 /** Payload of the `OrderPlaced` outbox event / SQS message. */
 export const orderPlacedMessageSchema = z.object({
   orderId: z.string().uuid(),

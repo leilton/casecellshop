@@ -253,7 +253,7 @@ describe('POST /checkout', () => {
     expectError(res, 415, 'UNSUPPORTED_MEDIA_TYPE');
   });
 
-  it('409 OUT_OF_STOCK lists the SKUs and reserves nothing', async () => {
+  it('409 OUT_OF_STOCK says what is left per SKU and reserves nothing', async () => {
     const res = await checkout({
       items: [
         { sku, quantity: 1 },
@@ -262,8 +262,25 @@ describe('POST /checkout', () => {
     });
 
     expectError(res, 409, 'OUT_OF_STOCK');
-    expect(res.json().error.details).toEqual({ skus: [emptySku] });
+    expect(res.json().error.details).toEqual({
+      skus: [emptySku],
+      items: [{ sku: emptySku, requested: 1, available: 0 }],
+    });
+    expect(res.json().error.message).toBe(
+      `${emptySku} is sold out. Nothing was reserved; adjust the quantity and try again.`,
+    );
     expect(await fx.inventory(sku)).toEqual({ available: 5, reserved: 0 });
+  });
+
+  it('409 OUT_OF_STOCK tells how many are left when the cart asks for more', async () => {
+    expect((await checkout({ items: [{ sku, quantity: 3 }] })).statusCode).toBe(202);
+
+    const res = await checkout({ items: [{ sku, quantity: 4 }] });
+
+    expectError(res, 409, 'OUT_OF_STOCK');
+    expect(res.json().error.details.items).toEqual([{ sku, requested: 4, available: 2 }]);
+    expect(res.json().error.message).toMatch(`Only 2 left of ${sku} (you asked for 4)`);
+    expect(await fx.inventory(sku)).toEqual({ available: 2, reserved: 3 });
   });
 
   it('422 IDEMPOTENCY_KEY_REUSED for the same key with a different payload', async () => {

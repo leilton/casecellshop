@@ -117,17 +117,30 @@ paths:
                       message: Request is invalid
                       details: [{ path: items.0.quantity, message: Number must be greater than or equal to 1 }]
         "409":
-          description: Not enough stock for at least one item. Nothing was reserved.
+          description: |
+            Not enough stock for at least one item. Nothing was reserved. `message` is written for the shopper;
+            `details.items` gives, per short SKU, what was asked and what is left right now, so the storefront can
+            offer "only 2 left". `available` is a snapshot (advisory, like the storefront stock).
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example:
-                error:
-                  {
-                    code: OUT_OF_STOCK,
-                    message: "Not enough stock for: CASE-S24-RED",
-                    details: { skus: [CASE-S24-RED] },
-                  }
+              schema: { $ref: "#/components/schemas/OutOfStockError" }
+              examples:
+                fewLeft:
+                  value:
+                    error:
+                      code: OUT_OF_STOCK
+                      message: "Only 2 left of CASE-S24-BLU (you asked for 3). Nothing was reserved; adjust the quantity and try again."
+                      details:
+                        skus: [CASE-S24-BLU]
+                        items: [{ sku: CASE-S24-BLU, requested: 3, available: 2 }]
+                soldOut:
+                  value:
+                    error:
+                      code: OUT_OF_STOCK
+                      message: "CASE-S24-RED is sold out. Nothing was reserved; adjust the quantity and try again."
+                      details:
+                        skus: [CASE-S24-RED]
+                        items: [{ sku: CASE-S24-RED, requested: 1, available: 0 }]
         "415":
           description: Content-Type is not `application/json`.
           content:
@@ -478,6 +491,39 @@ components:
         deps:
           type: object
           additionalProperties: { type: string, description: "`ok` or the error message." }
+
+    OutOfStockError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, details]
+          properties:
+            code: { type: string, enum: [OUT_OF_STOCK] }
+            message: { type: string }
+            details:
+              type: object
+              additionalProperties: false
+              required: [skus, items]
+              properties:
+                skus:
+                  type: array
+                  description: The short SKUs (kept for older clients; same as `items[].sku`).
+                  items: { type: string }
+                items:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [sku, requested, available]
+                    properties:
+                      sku: { type: string }
+                      requested: { type: integer, minimum: 1 }
+                      available: { type: integer, minimum: 0, description: Units left now (advisory). }
 
     Error:
       type: object

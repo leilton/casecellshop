@@ -14,7 +14,7 @@ paths:
 - Status contract:
   - `GET /products` → `200` (may be served stale; set `x-cache: hit|miss|stale`).
   - `POST /checkout` → `202 { orderId, status }`; `400` invalid payload or missing `Idempotency-Key`;
-    `409` out of stock; `422` same `Idempotency-Key` with a different payload; `429 RATE_LIMITED` per client
+    `409` out of stock (`details.items[] = { sku, requested, available }`, message written for the shopper); `422` same `Idempotency-Key` with a different payload; `429 RATE_LIMITED` per client
     IP and `503 OVERLOADED` at instance capacity, both with `Retry-After` and before any stock is touched.
   - `GET /orders/:id/status` → `200` / `404`.
   - `POST /orders/:id/cancel` → `200` (also when already `CANCELLED`: idempotent by state); `404`;

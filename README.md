@@ -87,14 +87,16 @@ Swagger UI at http://localhost:3000/docs (with "Try it out", no download needed)
 Every error has the same shape and a stable `code`:
 
 ```json
-{ "error": { "code": "OUT_OF_STOCK", "message": "Not enough stock for: CASE-S24-RED", "details": { "skus": ["CASE-S24-RED"] } } }
+{ "error": { "code": "OUT_OF_STOCK",
+  "message": "Only 2 left of CASE-S24-BLU (you asked for 3). Nothing was reserved; adjust the quantity and try again.",
+  "details": { "skus": ["CASE-S24-BLU"], "items": [{ "sku": "CASE-S24-BLU", "requested": 3, "available": 2 }] } } }
 ```
 
 | Status | Codes                                                                       |
 | ------ | --------------------------------------------------------------------------- |
 | 400    | `VALIDATION_ERROR`, `INVALID_JSON`, `MISSING_IDEMPOTENCY_KEY`, `INVALID_IDEMPOTENCY_KEY` |
 | 404    | `PRODUCT_NOT_FOUND`, `ORDER_NOT_FOUND`, `ROUTE_NOT_FOUND`                    |
-| 409    | `OUT_OF_STOCK` (nothing reserved), `ORDER_NOT_CANCELLABLE` (invoicing already started) |
+| 409    | `OUT_OF_STOCK` (nothing reserved; `details.items` has what is left per SKU), `ORDER_NOT_CANCELLABLE` (invoicing already started) |
 | 415    | `UNSUPPORTED_MEDIA_TYPE`                                                     |
 | 422    | `IDEMPOTENCY_KEY_REUSED` (same key, other items), `UNKNOWN_SKU`              |
 | 429    | `RATE_LIMITED` (per-client checkout budget; `Retry-After`, nothing reserved)  |

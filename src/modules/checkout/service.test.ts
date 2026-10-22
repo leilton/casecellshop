@@ -3,7 +3,7 @@ import { silentLogger } from '../../../tests/support/fakes';
 import { counterValue } from '../../../tests/support/metrics';
 import { checkoutRequests, stockReservationConflicts } from '../../shared/metrics';
 import type { CheckoutRepository, PlaceOrderInput, PlaceOrderResult } from './repository';
-import { createCheckoutService, hashCheckoutRequest } from './service';
+import { createCheckoutService, hashCheckoutRequest, outOfStockMessage } from './service';
 
 const ORDER_ID = '7d4f0c3a-8a6b-4c55-9a43-1f6f5f2b1a10';
 
@@ -18,6 +18,31 @@ function setup(result: (input: PlaceOrderInput) => PlaceOrderResult) {
 }
 
 const cmd = (items = [{ sku: 'CASE-A', quantity: 2 }]) => ({ idempotencyKey: 'key-1', items, correlationId: 'corr-1' });
+
+describe('outOfStockMessage', () => {
+  it('tells how many are left when some stock remains', () => {
+    expect(outOfStockMessage([{ sku: 'CASE-S24-BLU', requested: 3, available: 2 }])).toBe(
+      'Only 2 left of CASE-S24-BLU (you asked for 3). Nothing was reserved; adjust the quantity and try again.',
+    );
+  });
+
+  it('says sold out when nothing remains', () => {
+    expect(outOfStockMessage([{ sku: 'CASE-S24-RED', requested: 1, available: 0 }])).toBe(
+      'CASE-S24-RED is sold out. Nothing was reserved; adjust the quantity and try again.',
+    );
+  });
+
+  it('joins several short SKUs into one sentence', () => {
+    expect(
+      outOfStockMessage([
+        { sku: 'CASE-S24-RED', requested: 1, available: 0 },
+        { sku: 'CASE-S24-BLU', requested: 4, available: 3 },
+      ]),
+    ).toBe(
+      'CASE-S24-RED is sold out; only 3 left of CASE-S24-BLU (you asked for 4). Nothing was reserved; adjust the quantity and try again.',
+    );
+  });
+});
 
 describe('hashCheckoutRequest', () => {
   it('ignores item order but not quantities', () => {
@@ -106,16 +131,31 @@ describe('checkout service', () => {
     expect(placeOrder).not.toHaveBeenCalled();
   });
 
-  it('maps a failed reservation to 409 and counts a conflict per SKU', async () => {
-    const { service } = setup(() => ({ kind: 'out_of_stock', skus: ['CASE-A'] }));
-    const before = await counterValue(stockReservationConflicts, { sku: 'CASE-A' });
+  it('maps a failed reservation to 409 with what is left per SKU and counts a conflict per SKU', async () => {
+    const short = [
+      { sku: 'CASE-A', requested: 2, available: 1 },
+      { sku: 'CASE-B', requested: 1, available: 0 },
+    ];
+    const { service } = setup(() => ({ kind: 'out_of_stock', items: short }));
+    const before = {
+      a: await counterValue(stockReservationConflicts, { sku: 'CASE-A' }),
+      b: await counterValue(stockReservationConflicts, { sku: 'CASE-B' }),
+    };
 
-    await expect(service.place(cmd())).rejects.toMatchObject({
+    await expect(
+      service.place(
+        cmd([
+          { sku: 'CASE-A', quantity: 2 },
+          { sku: 'CASE-B', quantity: 1 },
+        ]),
+      ),
+    ).rejects.toMatchObject({
       code: 'OUT_OF_STOCK',
       httpStatus: 409,
-      details: { skus: ['CASE-A'] },
+      details: { skus: ['CASE-A', 'CASE-B'], items: short },
     });
-    expect(await counterValue(stockReservationConflicts, { sku: 'CASE-A' })).toBe(before + 1);
+    expect(await counterValue(stockReservationConflicts, { sku: 'CASE-A' })).toBe(before.a + 1);
+    expect(await counterValue(stockReservationConflicts, { sku: 'CASE-B' })).toBe(before.b + 1);
   });
 
   it('propagates repository failures unchanged', async () => {

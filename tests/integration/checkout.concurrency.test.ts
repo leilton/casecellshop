@@ -59,7 +59,10 @@ describe('checkout under concurrency (no overselling)', () => {
         { sku: plenty, quantity: 2 },
         { sku: scarce, quantity: 1 },
       ]),
-    ).rejects.toMatchObject({ code: 'OUT_OF_STOCK', details: { skus: [scarce] } });
+    ).rejects.toMatchObject({
+      code: 'OUT_OF_STOCK',
+      details: { skus: [scarce], items: [{ sku: scarce, requested: 1, available: 0 }] },
+    });
 
     expect(await fx.inventory(plenty)).toEqual({ available: 10, reserved: 0 });
   });

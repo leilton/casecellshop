@@ -90,14 +90,16 @@ interativa em http://localhost:3000/docs (com "Try it out", sem precisar baixar 
 Todo erro tem o mesmo formato e um `code` estável:
 
 ```json
-{ "error": { "code": "OUT_OF_STOCK", "message": "Not enough stock for: CASE-S24-RED", "details": { "skus": ["CASE-S24-RED"] } } }
+{ "error": { "code": "OUT_OF_STOCK",
+  "message": "Only 2 left of CASE-S24-BLU (you asked for 3). Nothing was reserved; adjust the quantity and try again.",
+  "details": { "skus": ["CASE-S24-BLU"], "items": [{ "sku": "CASE-S24-BLU", "requested": 3, "available": 2 }] } } }
 ```
 
 | Status | Códigos                                                                                   |
 | ------ | ----------------------------------------------------------------------------------------- |
 | 400    | `VALIDATION_ERROR`, `INVALID_JSON`, `MISSING_IDEMPOTENCY_KEY`, `INVALID_IDEMPOTENCY_KEY`  |
 | 404    | `PRODUCT_NOT_FOUND`, `ORDER_NOT_FOUND`, `ROUTE_NOT_FOUND`                                  |
-| 409    | `OUT_OF_STOCK` (nada foi reservado), `ORDER_NOT_CANCELLABLE` (o faturamento já começou)    |
+| 409    | `OUT_OF_STOCK` (nada foi reservado; `details.items` traz o que resta por SKU), `ORDER_NOT_CANCELLABLE` (o faturamento já começou)    |
 | 415    | `UNSUPPORTED_MEDIA_TYPE`                                                                   |
 | 422    | `IDEMPOTENCY_KEY_REUSED` (mesma chave, outros itens), `UNKNOWN_SKU`                        |
 | 429    | `RATE_LIMITED` (limite de checkouts por cliente; `Retry-After`, nada reservado)             |
