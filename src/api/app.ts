@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import http, { type IncomingHttpHeaders } from 'node:http';
 import path from 'node:path';
 import Fastify, { type FastifyError } from 'fastify';
 import { catalogRoutes } from '../modules/catalog/routes';
@@ -8,7 +9,7 @@ import { checkoutRoutes } from '../modules/checkout/routes';
 import type { CheckoutService } from '../modules/checkout/service';
 import { ordersRoutes } from '../modules/orders/routes';
 import type { OrdersService } from '../modules/orders/service';
-import { runWithContext } from '../shared/context';
+import { currentContext, runWithContext } from '../shared/context';
 import { AppError, type ErrorCode, isConnectionError } from '../shared/errors';
 import type { Logger } from '../shared/logger';
 import { httpRequestDuration, registry } from '../shared/metrics';
@@ -26,6 +27,12 @@ export interface AppDeps {
 
 const CORRELATION_HEADER = 'x-correlation-id';
 const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/** A valid client-supplied id is kept so a trace can start upstream; anything else gets a fresh one. */
+function resolveCorrelationId(headers: IncomingHttpHeaders): string {
+  const incoming = headers[CORRELATION_HEADER];
+  return typeof incoming === 'string' && CORRELATION_ID_PATTERN.test(incoming) ? incoming : randomUUID();
+}
 
 function errorBody(code: ErrorCode, message: string, details?: unknown) {
   return { error: { code, message, ...(details === undefined ? {} : { details }) } };
@@ -53,19 +60,29 @@ export async function buildApp(deps: AppDeps) {
   const app = Fastify({
     loggerInstance: deps.logger,
     genReqId: () => randomUUID(),
-    disableRequestLogging: false,
+    // Fastify logs "incoming request" before any hook runs, so the correlation context has to exist before
+    // Fastify's handler is called; otherwise that first line is the only one without a correlationId.
+    serverFactory: (handler) =>
+      http.createServer((req, res) => {
+        runWithContext({ correlationId: resolveCorrelationId(req.headers) }, () => handler(req, res));
+      }),
   });
 
   // The API only speaks JSON; without Fastify's default text/plain parser such bodies get a clear 415.
   app.removeContentTypeParser('text/plain');
 
-  // Runs the rest of the request lifecycle inside the correlation context, so logs, ERP calls and the outbox
-  // all see the same correlationId without passing it around.
+  // The rest of the request lifecycle runs inside the correlation context, so logs, ERP calls and the outbox
+  // all see the same correlationId without passing it around. The server factory normally created it already;
+  // without it (e.g. `app.inject` in tests) it is created here.
   app.addHook('onRequest', (req, reply, done) => {
-    const incoming = req.headers[CORRELATION_HEADER];
-    const correlationId =
-      typeof incoming === 'string' && CORRELATION_ID_PATTERN.test(incoming) ? incoming : randomUUID();
+    const existing = currentContext();
+    const correlationId = existing?.correlationId ?? resolveCorrelationId(req.headers);
     reply.header(CORRELATION_HEADER, correlationId);
+    if (existing) {
+      existing.requestId = req.id;
+      done();
+      return;
+    }
     runWithContext({ correlationId, requestId: req.id }, done);
   });
 
