@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-22
+
+### Documentation
+
+- `PROMPTS.md`: row 9 moved into the table (it sat after the note, so Markdown rendered it as plain text).
+
 ## [0.3.0] - 2026-10-22
 
 ### Added
