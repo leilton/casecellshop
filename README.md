@@ -1,5 +1,7 @@
 # CaseCellShop — Senior Backend Technical Challenge
 
+**English** · [Português (Brasil)](README.pt-BR.md)
+
 > Fictional company. 100% local environment: no cloud or Datadog account required.
 
 A small backend that shows how to put a fast, correct storefront and an asynchronous checkout in front of a
@@ -36,7 +38,7 @@ container).
 ```bash
 make up                         # api, worker, erp-mock, postgres, redis, sqs
 curl localhost:3000/health      # postgres, redis, sqs, erp = ok
-make test                       # 156 tests + coverage (runs inside the api container)
+make test                       # 157 tests + coverage (runs inside the api container)
 make obs                        # + otel-collector, jaeger, prometheus, grafana (exports traces)
 ```
 
@@ -54,7 +56,8 @@ curl localhost:3000/orders/<orderId>/status                         # RESERVED �
 
 | URL                                         | What                                     |
 | ------------------------------------------- | ---------------------------------------- |
-| http://localhost:3000/openapi.yaml          | API contract (also `docs/openapi.yaml`)  |
+| http://localhost:3000/docs                  | **Swagger UI**: read and try the API in the browser |
+| http://localhost:3000/openapi.yaml          | The contract as text (also `docs/openapi.yaml`)     |
 | http://localhost:3000/metrics               | API metrics (worker: `:9464/metrics`)    |
 | http://localhost:4000/admin/config          | ERP chaos (GET/POST)                     |
 | http://localhost:9325                       | Queue statistics (ElasticMQ)             |
@@ -67,7 +70,8 @@ after `make reset && make up`), `make reset` (wipe the database and re-seed), `m
 
 ## API
 
-Full contract with schemas and examples: [`docs/openapi.yaml`](docs/openapi.yaml).
+Full contract with schemas and examples: [`docs/openapi.yaml`](docs/openapi.yaml), also rendered as an interactive
+Swagger UI at http://localhost:3000/docs (with "Try it out", no download needed).
 
 | Route                          | Success                         | Errors                                   |
 | ------------------------------ | ------------------------------- | ---------------------------------------- |
@@ -224,7 +228,7 @@ Runbooks: [slow storefront](docs/runbooks/slow-storefront.md), [ERP degraded](do
 
 ## Tests
 
-`make test` runs 156 tests in the api container with a coverage gate (80% lines; currently ~92%). Unit tests
+`make test` runs 157 tests in the api container with a coverage gate (80% lines; currently ~92%). Unit tests
 live next to the code (`src/**/*.test.ts`) and use in-memory fakes; integration tests (`tests/integration/`)
 run against the compose Postgres, Redis and SQS, in an isolated `shop_test` database rebuilt from
 `infra/postgres/init.sql` on every run.

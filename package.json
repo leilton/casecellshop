@@ -1,6 +1,6 @@
 {
   "name": "casecellshop",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": true,
   "engines": {
     "node": ">=22"
@@ -14,13 +14,15 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome check --write .",
-    "check": "biome check . && tsc --noEmit",
+    "check": "biome check . && tsc --noEmit && sh scripts/check-readme-sync.sh",
     "start:api": "node dist/api/server.js",
     "start:worker": "node dist/worker/index.js",
     "prepare": "husky || true"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.700.0",
+    "@fastify/swagger": "^9.9.2",
+    "@fastify/swagger-ui": "^5.2.6",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/auto-instrumentations-node": "^0.52.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.54.0",

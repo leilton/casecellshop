@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-22
+
+### Added
+
+- `README.pt-BR.md`: Brazilian Portuguese translation of the README, linked from both files.
+  `scripts/check-readme-sync.sh` (run by the pre-commit hook and `npm run check`) fails when the two READMEs
+  differ in sections, tables, code blocks or when a relative link is broken.
+- Swagger UI at `GET /docs`, rendered from `docs/openapi.yaml` (`@fastify/swagger` in static mode +
+  `@fastify/swagger-ui`, assets bundled, works offline). `/docs/json` and `/docs/yaml` return the parsed contract.
+
+### Changed
+
+- `GET /openapi.yaml` is served as `text/plain` so browsers display it instead of downloading it.
+- The production image now includes `docs/openapi.yaml` (it was missing, so `/openapi.yaml` would have been `404`).
+
 ## [0.2.2] - 2026-10-22
 
 ### Documentation
