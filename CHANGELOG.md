@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-22
+
+### Documentation
+
+- README and PROMPTS.md state the current test count (156) instead of the count from before 0.2.1.
+
 ## [0.2.1] - 2026-10-22
 
 ### Fixed
