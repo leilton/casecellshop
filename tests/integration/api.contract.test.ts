@@ -132,6 +132,57 @@ const cases: Case[] = [
       }),
   },
   {
+    name: 'checkout 429',
+    method: 'post',
+    specPath: '/checkout',
+    status: 429,
+    call: async () => {
+      const { app: limited } = await createTestApp(db, redis, new FakeErp([{ sku }]), {
+        checkoutLimits: { rateLimit: { max: 1, windowS: 60 } },
+      });
+      try {
+        const send = () =>
+          limited.inject({
+            method: 'POST',
+            url: '/checkout',
+            headers: { ...json, 'idempotency-key': uniqueId('c') },
+            payload: { items: [{ sku, quantity: 1 }] },
+          });
+        await send();
+        return await send();
+      } finally {
+        await limited.close();
+      }
+    },
+  },
+  {
+    name: 'checkout 503 overloaded',
+    method: 'post',
+    specPath: '/checkout',
+    status: 503,
+    call: async () => {
+      // No slots and no queue: every checkout is shed before the service runs.
+      const { app: full } = await createTestApp(db, redis, new FakeErp([{ sku }]), {
+        checkoutLimits: { max: 1, maxQueue: 0 },
+        checkout: { place: () => new Promise(() => undefined) },
+      });
+      try {
+        const send = () =>
+          full.inject({
+            method: 'POST',
+            url: '/checkout',
+            headers: { ...json, 'idempotency-key': uniqueId('c') },
+            payload: { items: [{ sku, quantity: 1 }] },
+          });
+        void send();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return await send();
+      } finally {
+        await full.close();
+      }
+    },
+  },
+  {
     name: 'order status 200',
     method: 'get',
     specPath: '/orders/{orderId}/status',
@@ -159,6 +210,35 @@ const cases: Case[] = [
     specPath: '/orders/{orderId}/status',
     status: 404,
     call: () => app.inject({ url: '/orders/2f1e0d9c-8b7a-4695-8473-625140302f1e/status' }),
+  },
+  {
+    name: 'order cancel 200',
+    method: 'post',
+    specPath: '/orders/{orderId}/cancel',
+    status: 200,
+    call: async () => {
+      const placed = await app.inject({
+        method: 'POST',
+        url: '/checkout',
+        headers: { ...json, 'idempotency-key': uniqueId('c') },
+        payload: { items: [{ sku, quantity: 1 }] },
+      });
+      return app.inject({ method: 'POST', url: `/orders/${placed.json().orderId}/cancel` });
+    },
+  },
+  {
+    name: 'order cancel 400',
+    method: 'post',
+    specPath: '/orders/{orderId}/cancel',
+    status: 400,
+    call: () => app.inject({ method: 'POST', url: '/orders/not-a-uuid/cancel' }),
+  },
+  {
+    name: 'order cancel 404',
+    method: 'post',
+    specPath: '/orders/{orderId}/cancel',
+    status: 404,
+    call: () => app.inject({ method: 'POST', url: '/orders/2f1e0d9c-8b7a-4695-8473-625140302f1e/cancel' }),
   },
   { name: 'health 200', method: 'get', specPath: '/health', status: 200, call: () => app.inject({ url: '/health' }) },
 ];

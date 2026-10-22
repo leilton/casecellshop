@@ -62,6 +62,7 @@ export function createInvoicingService(deps: InvoicingServiceDeps): InvoicingSer
 
   async function findExistingInvoice(orderId: string): Promise<string | undefined> {
     const invoices = await deps.erp.findInvoices(orderId);
+    // Stryker disable next-line all: alert-only log for a duplicate that already happened; behaviour is the same
     if (invoices.length > 1) {
       deps.logger.error({ orderId, invoiceIds: invoices.map((i) => i.invoiceId) }, 'duplicate ERP invoices found');
     }
@@ -148,14 +149,16 @@ export function createInvoicingService(deps: InvoicingServiceDeps): InvoicingSer
           if (existing) {
             await adopt(orderId, existing, 'reconciliation');
             adopted += 1;
-          } else if (expired.includes(orderId)) {
-            // Only never-started orders are cancelled here; INVOICING ones still have a message that will retry
-            // or reach the DLQ, which settles them with the same lookup-first rule.
-            const res = await deps.repo.releaseReservation(orderId, 'CANCELLED', 'reservation expired', ['RESERVED']);
-            if (res.kind === 'done') {
-              observeFinal(res.order);
-              cancelled += 1;
-            }
+            continue;
+          }
+          // Only never-started orders are cancelled here; INVOICING ones still have a message that will retry
+          // or reach the DLQ, which settles them with the same lookup-first rule.
+          // Stryker disable next-line ConditionalExpression: a stuck INVOICING order is refused by allowedFrom ['RESERVED'] anyway
+          if (!expired.includes(orderId)) continue;
+          const res = await deps.repo.releaseReservation(orderId, 'CANCELLED', 'reservation expired', ['RESERVED']);
+          if (res.kind === 'done') {
+            observeFinal(res.order);
+            cancelled += 1;
           }
         } catch (err) {
           deps.logger.warn(
@@ -164,6 +167,7 @@ export function createInvoicingService(deps: InvoicingServiceDeps): InvoicingSer
           );
         }
       }
+      // Stryker disable next-line all: log-only summary
       if (cancelled + adopted > 0) deps.logger.info({ cancelled, adopted }, 'reconciliation settled orders');
       return { cancelled, adopted };
     },

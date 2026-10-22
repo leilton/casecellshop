@@ -1,0 +1,184 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      load:
+        description: Also run the k6 overselling + double-click test (make load) on the compose stack
+        type: boolean
+        default: false
+      mutation:
+        description: Also run Stryker mutation testing on checkout + invoicing (make mutation, ~minutes)
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, types, README sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  test:
+    name: Tests + coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Same images as docker-compose.yml. Postgres needs no init script: tests/support/global-setup.ts rebuilds
+    # shop_test from infra/postgres/init.sql. ElasticMQ runs with its default config: the tests create their queues.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: shop
+          POSTGRES_PASSWORD: shop
+          POSTGRES_DB: shop
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U shop -d shop"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      sqs:
+        image: softwaremill/elasticmq-native:1.6.11
+        ports: ["9324:9324"]
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://shop:shop@localhost:5432/shop
+      REDIS_URL: redis://localhost:6379
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      SQS_ENDPOINT: http://localhost:9324
+      CHECKOUT_QUEUE_URL: http://localhost:9324/000000000000/checkout-orders
+      CHECKOUT_DLQ_URL: http://localhost:9324/000000000000/checkout-orders-dlq
+      ERP_BASE_URL: http://localhost:4000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # The ERP mock is built from this repo, so it cannot be a service container; it has no dependencies.
+      - name: Start ERP mock
+        run: |
+          PORT=4000 nohup node erp-mock/server.mjs > erp-mock.log 2>&1 &
+          for _ in $(seq 1 30); do curl -sf http://localhost:4000/health > /dev/null && exit 0; sleep 1; done
+          cat erp-mock.log; exit 1
+      # The ElasticMQ image has no healthcheck: wait until it answers.
+      - name: Wait for ElasticMQ
+        run: |
+          for _ in $(seq 1 30); do curl -s -o /dev/null http://localhost:9324/ && exit 0; sleep 1; done
+          exit 1
+      - run: npm test
+      - name: Coverage summary
+        if: always() && hashFiles('coverage/coverage-summary.json') != ''
+        run: |
+          {
+            echo '### Coverage'
+            echo '| Metric | % |'
+            echo '| --- | --- |'
+            jq -r '.total | to_entries[] | select(.key != "branchesTrue") | "| \(.key) | \(.value.pct) |"' \
+              coverage/coverage-summary.json
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  load:
+    name: Load test (make load)
+    if: github.event_name == 'workflow_dispatch' && inputs.load
+    needs: [check, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SKU: CASE-IPH15-BLK
+      SEEDED_STOCK: 10 # infra/postgres/init.sql
+    steps:
+      - uses: actions/checkout@v4
+      - run: make reset
+      - run: make up
+      - name: Wait for the API
+        run: |
+          for _ in $(seq 1 60); do curl -sf http://localhost:3000/health > /dev/null && exit 0; sleep 2; done
+          exit 1
+      - run: make load
+      # k6 proves the HTTP side (status codes, same orderId on double click); this proves the stock side.
+      - name: Assert no overselling
+        run: |
+          held=$(docker compose exec -T postgres psql -U shop -d shop -tAc "
+            SELECT coalesce(sum((i->>'quantity')::int), 0) FROM orders o, jsonb_array_elements(o.items) i
+            WHERE i->>'sku' = '$SKU' AND o.status IN ('RESERVED', 'INVOICING', 'INVOICED')")
+          available=$(docker compose exec -T postgres psql -U shop -d shop -tAc \
+            "SELECT available FROM inventory WHERE sku = '$SKU'")
+          echo "orders holding $SKU: $held units; available: $available; seeded: $SEEDED_STOCK"
+          test "$held" -le "$SEEDED_STOCK"
+          test "$((held + available))" -eq "$SEEDED_STOCK"
+      - name: Compose logs
+        if: failure()
+        run: docker compose logs --no-color api worker erp-mock
+      - if: always()
+        run: make down
+
+  mutation:
+    name: Mutation testing (make mutation)
+    if: github.event_name == 'workflow_dispatch' && inputs.mutation
+    needs: [check, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # make mutation mounts the checkout into the api container, so it uses these node_modules.
+      - run: npm ci
+      - run: make up
+      - name: Wait for the API
+        run: |
+          for _ in $(seq 1 60); do curl -sf http://localhost:3000/health > /dev/null && exit 0; sleep 2; done
+          exit 1
+      - run: make mutation
+      - name: Mutation score
+        if: always() && hashFiles('reports/mutation/mutation.json') != ''
+        run: |
+          jq -r '[.files[].mutants[]] | (map(select(.status == "Killed" or .status == "Timeout")) | length) as $k
+            | (map(select(.status == "Survived" or .status == "NoCoverage")) | length) as $s
+            | "### Mutation score\n\(($k * 10000 / ($k + $s) | floor) / 100)% (\($k) killed, \($s) survived or uncovered)"' \
+            reports/mutation/mutation.json >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-report
+          path: reports/mutation/
+          retention-days: 14
+          if-no-files-found: ignore
+      - if: always()
+        run: make down

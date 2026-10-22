@@ -6,6 +6,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- GitHub Actions CI: `npm run check` and `npm test` (Postgres, Redis, ElasticMQ services + ERP mock) on every push
+  and PR, coverage report as artifact and job summary, opt-in `make load` job via `workflow_dispatch`; CI badge in
+  both READMEs.
+- Checkout peak protection (ADR 0009): per-client-IP rate limit on `POST /checkout` (`@fastify/rate-limit`, Redis
+  counters, fail open) → `429 RATE_LIMITED`; per-instance concurrency cap with a short FIFO wait queue →
+  `503 OVERLOADED`. Both send `Retry-After` and reserve nothing. New config: `TRUST_PROXY`, `CHECKOUT_RATE_LIMIT_*`,
+  `CHECKOUT_MAX_CONCURRENCY`, `CHECKOUT_MAX_QUEUE`, `CHECKOUT_QUEUE_TIMEOUT_MS`.
+- Metrics: `checkout_requests_total{outcome="rate_limited"|"shed"}`, gauges `checkout_inflight` and
+  `checkout_queue_waiting`. Alert `CheckoutLoadShedding` with its runbook.
+- `make load-peak` (`tests/load/peak.js`): a checkout spike plus one abusive client. Measured results are in the README.
+- `POST /orders/{orderId}/cancel` (ADR 0010): cancels a `RESERVED` order and releases its stock in the same
+  transaction, under the order row lock the worker also takes; idempotent by state; `409 ORDER_NOT_CANCELLABLE`
+  once invoicing started. Metric `order_cancellations_total{outcome}`.
+- `409 OUT_OF_STOCK` now has `details.items[] = { sku, requested, available }` and a message written for the
+  shopper ("Only 2 left of …"); `details.skus` is kept.
+- Test quality (ADR 0011): fast-check property test for reservations against Postgres; Stryker mutation testing on
+  `checkout` and `invoicing` (`make mutation`, 100% score, fails below 95%), manual CI job with the report as artifact.
+
+### Changed
+
+- `tests/load/oversell.js` sends one `X-Forwarded-For` per virtual user, so each one is its own client for the
+  rate limit.
+
 ## [0.3.1] - 2026-10-22
 
 ### Documentation

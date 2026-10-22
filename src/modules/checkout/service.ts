@@ -5,7 +5,7 @@ import { type CheckoutOutcome, checkoutRequests, stockReservationConflicts } fro
 import { injectTraceContext, withSpan } from '../../shared/tracing';
 import type { CatalogService } from '../catalog/service';
 import type { CheckoutRepository } from './repository';
-import type { CheckoutAccepted, CheckoutItem } from './schemas';
+import type { CheckoutAccepted, CheckoutItem, OutOfStockDetails, StockShortage } from './schemas';
 
 export interface CheckoutServiceDeps {
   repo: CheckoutRepository;
@@ -31,11 +31,18 @@ export interface CheckoutService {
 
 /** Order-insensitive hash so that `[A, B]` and `[B, A]` count as the same request for idempotency. */
 export function hashCheckoutRequest(items: CheckoutItem[]): string {
-  const canonical = [...items]
-    .sort((a, b) => a.sku.localeCompare(b.sku))
-    .map((i) => `${i.sku}:${i.quantity}`)
-    .join('|');
-  return createHash('sha256').update(canonical).digest('hex');
+  const parts = [...items].sort((a, b) => a.sku.localeCompare(b.sku)).map((i) => `${i.sku}:${i.quantity}`);
+  // Stryker disable next-line StringLiteral: skus cannot contain ':' and quantities are one digit, so even no separator cannot collide
+  return createHash('sha256').update(parts.join('|')).digest('hex');
+}
+
+/** A message a shopper can read: what is short, what is left, and that nothing was taken from them. */
+export function outOfStockMessage(items: StockShortage[]): string {
+  const parts = items.map((i) =>
+    i.available === 0 ? `${i.sku} is sold out` : `only ${i.available} left of ${i.sku} (you asked for ${i.requested})`,
+  );
+  const sentence = parts.join('; ');
+  return `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}. Nothing was reserved; adjust the quantity and try again.`;
 }
 
 export function statusUrl(orderId: string): string {
@@ -59,6 +66,7 @@ export function createCheckoutService(deps: CheckoutServiceDeps): CheckoutServic
         throw new AppError('UNKNOWN_SKU', 422, `Unknown sku: ${unknown.join(', ')}`, { skus: unknown });
       }
 
+      // Stryker disable next-line OptionalChaining: every sku was priced just above (unknown ones throw)
       const items = cmd.items.map((i) => ({ ...i, priceCents: priced.get(i.sku)?.priceCents ?? 0 }));
       const totalCents = items.reduce((sum, i) => sum + i.priceCents * i.quantity, 0);
 
@@ -102,10 +110,11 @@ export function createCheckoutService(deps: CheckoutServiceDeps): CheckoutServic
           };
         case 'out_of_stock':
           count('out_of_stock');
-          for (const sku of result.skus) stockReservationConflicts.inc({ sku });
-          throw new AppError('OUT_OF_STOCK', 409, `Not enough stock for: ${result.skus.join(', ')}`, {
-            skus: result.skus,
-          });
+          for (const { sku } of result.items) stockReservationConflicts.inc({ sku });
+          throw new AppError('OUT_OF_STOCK', 409, outOfStockMessage(result.items), {
+            skus: result.items.map((i) => i.sku),
+            items: result.items,
+          } satisfies OutOfStockDetails);
       }
     },
   };

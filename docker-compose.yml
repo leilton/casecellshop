@@ -36,6 +36,14 @@ x-app-env: &app-env
   RECONCILE_INTERVAL_MS: ${RECONCILE_INTERVAL_MS:-30000}
   INVOICING_STUCK_AFTER_S: ${INVOICING_STUCK_AFTER_S:-120}
   INVOICING_LEASE_S: ${INVOICING_LEASE_S:-15}
+  # Checkout peak protection (ADR 0009). TRUST_PROXY is on locally only so k6 can simulate many clients through
+  # X-Forwarded-For; in production enable it only behind a proxy that overwrites that header.
+  TRUST_PROXY: ${TRUST_PROXY:-true}
+  CHECKOUT_RATE_LIMIT_MAX: ${CHECKOUT_RATE_LIMIT_MAX:-20}
+  CHECKOUT_RATE_LIMIT_WINDOW_S: ${CHECKOUT_RATE_LIMIT_WINDOW_S:-10}
+  CHECKOUT_MAX_CONCURRENCY: ${CHECKOUT_MAX_CONCURRENCY:-16}
+  CHECKOUT_MAX_QUEUE: ${CHECKOUT_MAX_QUEUE:-100}
+  CHECKOUT_QUEUE_TIMEOUT_MS: ${CHECKOUT_QUEUE_TIMEOUT_MS:-1000}
   # Telemetry (OpenTelemetry → collector).
   # `none` unless the obs profile runs (make obs sets otlp): exporting to a missing collector starves DNS lookups.
   OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}

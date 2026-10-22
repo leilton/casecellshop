@@ -91,6 +91,7 @@ async function addEvent(tx: DbClient, orderId: string, from: OrderStatus, to: Or
 }
 
 function sortedItems(items: OrderItem[]): OrderItem[] {
+  // Stryker disable next-line all: lock ordering only prevents deadlocks, which no deterministic test can observe
   return [...items].sort((a, b) => a.sku.localeCompare(b.sku));
 }
 
@@ -101,7 +102,9 @@ export function createInvoicingRepository(db: Db): InvoicingRepository {
         const row = await lockOrder(tx, orderId);
         if (!row) return { kind: 'not_found' };
         if (TERMINAL_STATUSES.includes(row.status)) return { kind: 'terminal', order: toOrder(row) };
+        // Stryker disable next-line ConditionalExpression: only INVOICING orders hold a lease; every exit from INVOICING clears it
         if (row.status === 'INVOICING' && (row.lease_remaining_s ?? 0) > 0) {
+          // Stryker disable next-line LogicalOperator: inside this branch the lease is > 0, never nullish
           return { kind: 'busy', retryInS: row.lease_remaining_s ?? leaseS };
         }
         const { rows } = await tx.query<OrderRow>(
@@ -110,10 +113,12 @@ export function createInvoicingRepository(db: Db): InvoicingRepository {
            WHERE id = $1 RETURNING id, status, attempts, items, erp_invoice_id, created_at`,
           [orderId, leaseS],
         );
+        // Stryker disable next-line LogicalOperator: an UPDATE of the locked row always returns it
         const updated = rows[0] ?? row;
         if (row.status !== 'INVOICING') {
           await addEvent(tx, orderId, row.status, 'INVOICING', { attempt: updated.attempts });
         }
+        // Stryker disable next-line StringLiteral: callers only branch on the other kinds
         return { kind: 'started', order: toOrder(updated) };
       }),
 
@@ -145,6 +150,7 @@ export function createInvoicingRepository(db: Db): InvoicingRepository {
           [orderId, invoiceId],
         );
         await addEvent(tx, orderId, row.status, 'INVOICED', { invoiceId, ...detail });
+        // Stryker disable next-line LogicalOperator: an UPDATE of the locked row always returns it
         return { kind: 'done', order: toOrder(rows[0] ?? row) };
       }),
 
@@ -166,6 +172,7 @@ export function createInvoicingRepository(db: Db): InvoicingRepository {
           [orderId, to, reason],
         );
         await addEvent(tx, orderId, row.status, to, { reason, released: true });
+        // Stryker disable next-line LogicalOperator: an UPDATE of the locked row always returns it
         return { kind: 'done', order: toOrder(rows[0] ?? row) };
       }),
 

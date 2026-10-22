@@ -24,6 +24,17 @@ const envSchema = z.object({
 
   CATALOG_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(10_000),
 
+  // Peak protection on POST /checkout (ADR 0009). Only trust X-Forwarded-For behind a proxy we control.
+  TRUST_PROXY: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  CHECKOUT_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(20),
+  CHECKOUT_RATE_LIMIT_WINDOW_S: z.coerce.number().int().positive().default(10),
+  CHECKOUT_MAX_CONCURRENCY: z.coerce.number().int().positive().default(16),
+  CHECKOUT_MAX_QUEUE: z.coerce.number().int().nonnegative().default(100),
+  CHECKOUT_QUEUE_TIMEOUT_MS: z.coerce.number().int().positive().default(1000),
+
   RESERVATION_TTL_S: z.coerce.number().int().positive().default(900),
   WORKER_CONCURRENCY: z.coerce.number().int().positive().default(5),
   WORKER_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),

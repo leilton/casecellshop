@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { createCheckoutRepository } from '../../src/modules/checkout/repository';
 import type { Db } from '../../src/shared/db';
 import type { RedisClient } from '../../src/shared/redis';
 import { createServices, createTestRedis, type TestServices } from '../support/app';
@@ -59,7 +60,10 @@ describe('checkout under concurrency (no overselling)', () => {
         { sku: plenty, quantity: 2 },
         { sku: scarce, quantity: 1 },
       ]),
-    ).rejects.toMatchObject({ code: 'OUT_OF_STOCK', details: { skus: [scarce] } });
+    ).rejects.toMatchObject({
+      code: 'OUT_OF_STOCK',
+      details: { skus: [scarce], items: [{ sku: scarce, requested: 1, available: 0 }] },
+    });
 
     expect(await fx.inventory(plenty)).toEqual({ available: 10, reserved: 0 });
   });
@@ -87,5 +91,50 @@ describe('checkout under concurrency (no overselling)', () => {
     expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
     expect(await fx.inventory(a)).toEqual({ available: 0, reserved: 20 });
     expect(await fx.inventory(b)).toEqual({ available: 0, reserved: 20 });
+  });
+});
+
+describe('checkout repository edges', () => {
+  const input = (items: Array<{ sku: string; quantity: number; priceCents: number }>, totalCents = 1000) => {
+    const key = uniqueId('repo');
+    return {
+      idempotencyKey: key,
+      requestHash: key,
+      items,
+      totalCents,
+      correlationId: key,
+      reservationTtlS: 900,
+      message: { correlationId: key },
+    };
+  };
+
+  it('records the reserved items (sku and quantity only) on the RESERVED event', async () => {
+    const sku = await fx.sku({ available: 5 });
+
+    const result = await createCheckoutRepository(db).placeOrder(input([{ sku, quantity: 2, priceCents: 1000 }]));
+
+    expect(result.kind).toBe('created');
+    const orderId = result.kind === 'created' ? result.orderId : '';
+    const history = (await services.orders.getStatus(orderId)).history;
+    expect(history[0]?.detail).toEqual({ items: [{ sku, quantity: 2 }] });
+  });
+
+  it('a product without an inventory row is reported as 0 left, not as an error', async () => {
+    const sku = uniqueId('NOINV');
+    fx.track(sku);
+    await db.query('INSERT INTO products (sku, name, price_cents) VALUES ($1, $1, 1000)', [sku]);
+
+    const result = await createCheckoutRepository(db).placeOrder(input([{ sku, quantity: 1, priceCents: 1000 }]));
+
+    expect(result).toEqual({ kind: 'out_of_stock', items: [{ sku, requested: 1, available: 0 }] });
+  });
+
+  it('a database error is propagated, never mistaken for out of stock', async () => {
+    const sku = await fx.sku({ available: 5 });
+
+    await expect(
+      createCheckoutRepository(db).placeOrder(input([{ sku, quantity: 1, priceCents: 1000 }], 2 ** 40)),
+    ).rejects.toThrow(/out of range/);
+    expect(await fx.inventory(sku)).toEqual({ available: 5, reserved: 0 });
   });
 });

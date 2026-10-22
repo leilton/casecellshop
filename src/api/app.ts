@@ -3,19 +3,22 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import http, { type IncomingHttpHeaders } from 'node:http';
 import path from 'node:path';
+import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import Fastify, { type FastifyError } from 'fastify';
 import { catalogRoutes } from '../modules/catalog/routes';
 import type { CatalogService } from '../modules/catalog/service';
-import { checkoutRoutes } from '../modules/checkout/routes';
+import { type CheckoutRateLimit, checkoutRoutes } from '../modules/checkout/routes';
 import type { CheckoutService } from '../modules/checkout/service';
 import { ordersRoutes } from '../modules/orders/routes';
 import type { OrdersService } from '../modules/orders/service';
+import { type ConcurrencyLimits, createConcurrencyLimiter } from '../shared/concurrency';
 import { currentContext, runWithContext } from '../shared/context';
 import { AppError, type ErrorCode, isConnectionError } from '../shared/errors';
 import type { Logger } from '../shared/logger';
-import { httpRequestDuration, registry } from '../shared/metrics';
+import { checkoutInflight, checkoutQueueWaiting, httpRequestDuration, registry } from '../shared/metrics';
+import type { RedisClient } from '../shared/redis';
 
 export type DependencyStatus = Record<string, 'ok' | string>;
 
@@ -26,6 +29,27 @@ export interface AppDeps {
   orders: OrdersService;
   health: () => Promise<DependencyStatus>;
   openApiPath?: string;
+  /** Peak protection for POST /checkout (ADR 0009). Defaults are generous so tests opt in to tight limits. */
+  checkoutLimits?: Partial<ConcurrencyLimits & { rateLimit: CheckoutRateLimit }>;
+  /** Shared rate-limit counters across instances; without it each instance counts in memory. */
+  rateLimitRedis?: RedisClient;
+  /** Redis key prefix for the rate-limit counters (tests isolate themselves with a unique one). */
+  rateLimitNamespace?: string;
+  /** Honor X-Forwarded-For for the client IP. Only behind a proxy that overwrites it. */
+  trustProxy?: boolean;
+}
+
+const DEFAULT_CHECKOUT_LIMITS = {
+  max: 1000,
+  maxQueue: 1000,
+  queueTimeoutMs: 1000,
+  rateLimit: { max: 1_000_000, windowS: 1 },
+};
+
+/** AppErrors that tell the client when to come back (e.g. OVERLOADED) carry `details.retryAfterS`. */
+function retryAfterOf(err: AppError): number | undefined {
+  const details = err.details as { retryAfterS?: unknown } | undefined;
+  return typeof details?.retryAfterS === 'number' ? details.retryAfterS : undefined;
 }
 
 const CORRELATION_HEADER = 'x-correlation-id';
@@ -63,6 +87,7 @@ export async function buildApp(deps: AppDeps) {
   const app = Fastify({
     loggerInstance: deps.logger,
     genReqId: () => randomUUID(),
+    trustProxy: deps.trustProxy ?? false,
     // Fastify logs "incoming request" before any hook runs, so the correlation context has to exist before
     // Fastify's handler is called; otherwise that first line is the only one without a correlationId.
     serverFactory: (handler) =>
@@ -101,7 +126,11 @@ export async function buildApp(deps: AppDeps) {
 
   app.setErrorHandler((err: FastifyError, req, reply) => {
     if (err instanceof AppError) {
-      if (err.httpStatus >= 500) req.log.warn({ code: err.code }, err.message);
+      const retryAfterS = retryAfterOf(err);
+      // Shedding is expected backpressure, counted in checkout_requests_total: a log line per shed request would
+      // spend the CPU the shedding is trying to save.
+      if (err.httpStatus >= 500 && retryAfterS === undefined) req.log.warn({ code: err.code }, err.message);
+      if (retryAfterS !== undefined) reply.header('retry-after', String(retryAfterS));
       return reply.code(err.httpStatus).send(errorBody(err.code, err.message, err.details));
     }
     const mapped = fromFastifyError(err);
@@ -150,7 +179,23 @@ export async function buildApp(deps: AppDeps) {
   }
 
   await app.register(catalogRoutes, { service: deps.catalog });
-  await app.register(checkoutRoutes, { service: deps.checkout });
+  // Registered globally but enabled per route (only POST /checkout opts in). If Redis fails the limiter is
+  // skipped: losing per-client fairness for a moment is better than refusing every checkout.
+  await app.register(rateLimit, {
+    global: false,
+    skipOnError: true,
+    ...(deps.rateLimitRedis ? { redis: deps.rateLimitRedis } : {}),
+    nameSpace: deps.rateLimitNamespace ?? 'rl:',
+    keyGenerator: (req) => req.ip,
+  });
+  const limits = { ...DEFAULT_CHECKOUT_LIMITS, ...deps.checkoutLimits };
+  const limiter = createConcurrencyLimiter(limits, {
+    onChange: ({ inflight, waiting }) => {
+      checkoutInflight.set(inflight);
+      checkoutQueueWaiting.set(waiting);
+    },
+  });
+  await app.register(checkoutRoutes, { service: deps.checkout, limiter, rateLimit: limits.rateLimit });
   await app.register(ordersRoutes, { service: deps.orders });
 
   return app;

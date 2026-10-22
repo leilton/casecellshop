@@ -1,5 +1,5 @@
 import { type Db, withTx } from '../../shared/db';
-import type { OrderPlacedMessage, OrderStatus } from './schemas';
+import type { OrderPlacedMessage, OrderStatus, StockShortage } from './schemas';
 
 export interface PricedItem {
   sku: string;
@@ -20,14 +20,15 @@ export interface PlaceOrderInput {
 export type PlaceOrderResult =
   | { kind: 'created'; orderId: string; status: OrderStatus }
   | { kind: 'existing'; orderId: string; status: OrderStatus; requestHash: string }
-  | { kind: 'out_of_stock'; skus: string[] };
+  | { kind: 'out_of_stock'; items: StockShortage[] };
 
 export interface CheckoutRepository {
   placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResult>;
 }
 
 class OutOfStock extends Error {
-  constructor(readonly skus: string[]) {
+  constructor(readonly items: StockShortage[]) {
+    // Stryker disable next-line StringLiteral: control-flow signal caught below, the message is never read
     super('out of stock');
   }
 }
@@ -60,6 +61,7 @@ export function createCheckoutRepository(db: Db): CheckoutRepository {
               [input.idempotencyKey],
             );
             const existing = rows[0];
+            // Stryker disable next-line all: defensive; ON CONFLICT means the row exists and our lock waited for it
             if (!existing) throw new Error('idempotency conflict without a visible order');
             return {
               kind: 'existing',
@@ -70,14 +72,21 @@ export function createCheckoutRepository(db: Db): CheckoutRepository {
           }
 
           // Sorted SKU order gives every transaction the same lock order, so crossed carts cannot deadlock.
-          const missing: string[] = [];
+          const missing: StockShortage[] = [];
           for (const item of [...input.items].sort((a, b) => a.sku.localeCompare(b.sku))) {
             const res = await tx.query(
               `UPDATE inventory SET available = available - $2, reserved = reserved + $2, updated_at = now()
                WHERE sku = $1 AND available >= $2 RETURNING available`,
               [item.sku, item.quantity],
             );
-            if (res.rowCount === 0) missing.push(item.sku);
+            if (res.rowCount === 0) {
+              // Failure path only, and this transaction never touched this SKU, so the read is a plain snapshot
+              // of what is left. Advisory, like the storefront stock: the next reservation is still the real check.
+              const left = await tx.query<{ available: number }>('SELECT available FROM inventory WHERE sku = $1', [
+                item.sku,
+              ]);
+              missing.push({ sku: item.sku, requested: item.quantity, available: left.rows[0]?.available ?? 0 });
+            }
           }
           if (missing.length > 0) throw new OutOfStock(missing);
 
@@ -92,7 +101,7 @@ export function createCheckoutRepository(db: Db): CheckoutRepository {
           return { kind: 'created', orderId: created.id, status: created.status };
         });
       } catch (err) {
-        if (err instanceof OutOfStock) return { kind: 'out_of_stock', skus: err.skus };
+        if (err instanceof OutOfStock) return { kind: 'out_of_stock', items: err.items };
         throw err;
       }
     },

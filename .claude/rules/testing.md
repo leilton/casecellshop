@@ -15,5 +15,10 @@ paths:
   - **Idempotency:** same key → same `orderId`; same key + different body → `422`.
   - **Cache:** single-flight (one ERP call for N concurrent misses), stale-if-error, TTL per data type.
   - **Worker:** retry with lookup-before-retry never creates a second invoice; DLQ releases stock.
+  - **Reservation properties:** `tests/integration/checkout.property.test.ts` (fast-check) must keep passing; a new
+    stock-moving path (release, cancel, adjust) gets added to its generated commands.
+- **Mutation testing:** `make mutation` (Stryker, `checkout` + `invoicing` only, ADR 0011). A change in those modules
+  must not lower the score below `thresholds.break` in `stryker.config.json`. Kill new survivors with a test;
+  `// Stryker disable next-line <mutator>: <reason>` only for equivalent or log-only mutants, always with a reason.
 - Use the ERP mock admin API (`/admin/config`, `/admin/products/:sku`) to force failures — never `sleep` blindly.
 - Load test (`tests/load/oversell.js`): ≤ initial stock accepted, double click returns the same `orderId`.

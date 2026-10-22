@@ -8,7 +8,9 @@ info:
     - `GET /products` is served from a cache in front of a slow ERP. It may return a stale copy when the ERP is
       down (`meta.stale: true`, `x-cache: stale`).
     - `POST /checkout` reserves stock atomically and returns `202`; invoicing in the ERP happens asynchronously.
-      Poll `GET /orders/{orderId}/status` (the `Location` header) to follow it.
+      Poll `GET /orders/{orderId}/status` (the `Location` header) to follow it. Under peak load it may answer
+      `429` (per-client rate limit) or `503 OVERLOADED` (instance at capacity) with `Retry-After`: nothing was
+      reserved, so retry after that delay with the same `Idempotency-Key`.
     - Every response carries `x-correlation-id` (echoed when sent, generated otherwise). Quote it when reporting
       a problem: logs, traces and the ERP call for that request share it.
 servers:
@@ -62,6 +64,15 @@ paths:
       tags: [checkout]
       summary: Start a purchase (reserve stock, invoice asynchronously)
       operationId: checkout
+      description: |
+        Peak protection (in this order, all before any stock is touched):
+        1. **Rate limit per client IP** (`CHECKOUT_RATE_LIMIT_MAX` per `CHECKOUT_RATE_LIMIT_WINDOW_S`, counted in
+           Redis and shared by every instance) → `429 RATE_LIMITED`.
+        2. **Concurrency limit per instance** (`CHECKOUT_MAX_CONCURRENCY`) with a short FIFO wait queue
+           (`CHECKOUT_MAX_QUEUE`, `CHECKOUT_QUEUE_TIMEOUT_MS`) → `503 OVERLOADED` when the queue is full or the
+           wait times out.
+
+        Both carry `Retry-After` (seconds). Retrying with the same `Idempotency-Key` is always safe.
       parameters:
         - $ref: "#/components/parameters/CorrelationId"
         - name: Idempotency-Key
@@ -85,6 +96,9 @@ paths:
               description: Order status URL.
               schema: { type: string }
             x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CheckoutAccepted" }
@@ -103,17 +117,30 @@ paths:
                       message: Request is invalid
                       details: [{ path: items.0.quantity, message: Number must be greater than or equal to 1 }]
         "409":
-          description: Not enough stock for at least one item. Nothing was reserved.
+          description: |
+            Not enough stock for at least one item. Nothing was reserved. `message` is written for the shopper;
+            `details.items` gives, per short SKU, what was asked and what is left right now, so the storefront can
+            offer "only 2 left". `available` is a snapshot (advisory, like the storefront stock).
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example:
-                error:
-                  {
-                    code: OUT_OF_STOCK,
-                    message: "Not enough stock for: CASE-S24-RED",
-                    details: { skus: [CASE-S24-RED] },
-                  }
+              schema: { $ref: "#/components/schemas/OutOfStockError" }
+              examples:
+                fewLeft:
+                  value:
+                    error:
+                      code: OUT_OF_STOCK
+                      message: "Only 2 left of CASE-S24-BLU (you asked for 3). Nothing was reserved; adjust the quantity and try again."
+                      details:
+                        skus: [CASE-S24-BLU]
+                        items: [{ sku: CASE-S24-BLU, requested: 3, available: 2 }]
+                soldOut:
+                  value:
+                    error:
+                      code: OUT_OF_STOCK
+                      message: "CASE-S24-RED is sold out. Nothing was reserved; adjust the quantity and try again."
+                      details:
+                        skus: [CASE-S24-RED]
+                        items: [{ sku: CASE-S24-RED, requested: 1, available: 0 }]
         "415":
           description: Content-Type is not `application/json`.
           content:
@@ -125,8 +152,37 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: |
+            `RATE_LIMITED`: this client sent too many checkouts in the current window. Checked before the body is
+            read; nothing was reserved. Wait `Retry-After` seconds.
+          headers:
+            Retry-After: { $ref: "#/components/headers/RetryAfter" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: { code: RATE_LIMITED, message: "Too many checkout attempts, retry in 10 seconds" } }
         "500": { $ref: "#/components/responses/InternalError" }
-        "503": { $ref: "#/components/responses/Unavailable" }
+        "503":
+          description: |
+            `OVERLOADED`: this instance is at its checkout capacity and the wait queue is full or the wait timed
+            out; nothing was reserved, `details.retryAfterS` equals `Retry-After`. Also `CATALOG_UNAVAILABLE` or
+            `DEPENDENCY_UNAVAILABLE` (see the shared 503). Retry with the same `Idempotency-Key`.
+          headers:
+            Retry-After:
+              description: Seconds to wait. Present for `OVERLOADED`.
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error:
+                  code: OVERLOADED
+                  message: Checkout is at capacity, retry later with the same Idempotency-Key
+                  details: { retryAfterS: 1 }
 
   /orders/{orderId}/status:
     get:
@@ -149,6 +205,47 @@ paths:
               schema: { $ref: "#/components/schemas/OrderStatus" }
         "400": { $ref: "#/components/responses/ValidationError" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /orders/{orderId}/cancel:
+    post:
+      tags: [orders]
+      summary: Cancel an order that is still reserved and give its stock back
+      description: |
+        Allowed only while the order is `RESERVED` (invoicing has not started). The reserved units return to
+        `available` in the same transaction. Idempotent by state: cancelling an order that is already `CANCELLED`
+        (by the customer or because its reservation expired) answers `200` again and releases nothing twice.
+        No body and no `Idempotency-Key` needed.
+      operationId: cancelOrder
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The order is `CANCELLED`; same body as `GET /orders/{orderId}/status`.
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderStatus" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            `ORDER_NOT_CANCELLABLE`: invoicing already started (`INVOICING`), finished (`INVOICED`) or failed
+            (`FAILED`). `details.status` is the current status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error:
+                  code: ORDER_NOT_CANCELLABLE
+                  message: Order is INVOICED and can no longer be cancelled
+                  details: { status: INVOICED }
         "500": { $ref: "#/components/responses/InternalError" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -212,6 +309,18 @@ components:
     CorrelationId:
       description: Correlation id of this request.
       schema: { type: string }
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema: { type: integer, minimum: 1 }
+    RateLimitLimit:
+      description: Checkouts allowed per client in the current window.
+      schema: { type: integer }
+    RateLimitRemaining:
+      description: Checkouts this client still has in the current window.
+      schema: { type: integer }
+    RateLimitReset:
+      description: Seconds until the window resets.
+      schema: { type: integer }
 
   responses:
     ValidationError:
@@ -383,6 +492,39 @@ components:
           type: object
           additionalProperties: { type: string, description: "`ok` or the error message." }
 
+    OutOfStockError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, details]
+          properties:
+            code: { type: string, enum: [OUT_OF_STOCK] }
+            message: { type: string }
+            details:
+              type: object
+              additionalProperties: false
+              required: [skus, items]
+              properties:
+                skus:
+                  type: array
+                  description: The short SKUs (kept for older clients; same as `items[].sku`).
+                  items: { type: string }
+                items:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [sku, requested, available]
+                    properties:
+                      sku: { type: string }
+                      requested: { type: integer, minimum: 1 }
+                      available: { type: integer, minimum: 0, description: Units left now (advisory). }
+
     Error:
       type: object
       additionalProperties: false
@@ -404,10 +546,13 @@ components:
                 - PRODUCT_NOT_FOUND
                 - ORDER_NOT_FOUND
                 - OUT_OF_STOCK
+                - ORDER_NOT_CANCELLABLE
                 - UNSUPPORTED_MEDIA_TYPE
                 - IDEMPOTENCY_KEY_REUSED
                 - UNKNOWN_SKU
                 - CATALOG_UNAVAILABLE
+                - RATE_LIMITED
+                - OVERLOADED
                 - DEPENDENCY_UNAVAILABLE
                 - INTERNAL_ERROR
             message: { type: string }

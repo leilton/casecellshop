@@ -31,15 +31,30 @@ export const checkoutBodySchema = z
 export type CheckoutBody = z.infer<typeof checkoutBodySchema>;
 export type CheckoutItem = z.infer<typeof checkoutItemSchema>;
 
+// Stryker disable next-line ArrayDeclaration,StringLiteral: only used for inferred types, never parsed at runtime
 export const orderStatusSchema = z.enum(['PENDING', 'RESERVED', 'INVOICING', 'INVOICED', 'FAILED', 'CANCELLED']);
 export type OrderStatus = z.infer<typeof orderStatusSchema>;
 
+// Stryker disable next-line ObjectLiteral: only used for the inferred type, never parsed at runtime
 export const checkoutAcceptedSchema = z.object({
   orderId: z.string().uuid(),
   status: orderStatusSchema,
   statusUrl: z.string(),
 });
 export type CheckoutAccepted = z.infer<typeof checkoutAcceptedSchema>;
+
+/** One SKU that could not be reserved, with what is left so the storefront can offer "only 2 left". */
+export interface StockShortage {
+  sku: string;
+  requested: number;
+  available: number;
+}
+
+/** `details` of a `409 OUT_OF_STOCK`; `skus` is kept for clients written before `items` existed. */
+export interface OutOfStockDetails {
+  skus: string[];
+  items: StockShortage[];
+}
 
 /** Payload of the `OrderPlaced` outbox event / SQS message. */
 export const orderPlacedMessageSchema = z.object({
