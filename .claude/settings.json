@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(npm test*)",
+      "Bash(./scripts/npx.sh *)",
+      "Bash(make up)",
+      "Bash(make obs)",
+      "Bash(make ps)",
+      "Bash(make logs)",
+      "Bash(make test)",
+      "Bash(make load)",
+      "Bash(make chaos)",
+      "Bash(make calm)",
+      "Bash(docker compose ps*)",
+      "Bash(docker compose logs*)",
+      "Bash(curl -s localhost*)",
+      "Bash(curl localhost*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git switch *)"
+    ],
+    "deny": ["Bash(git push --force*)", "Bash(git push -f*)"]
+  }
+}

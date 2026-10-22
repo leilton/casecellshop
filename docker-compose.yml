@@ -1,0 +1,187 @@
+# CaseCellShop — local environment for the technical challenge
+#
+#   docker compose up -d                       → core (api, worker, erp-mock, postgres, redis, queue)
+#   docker compose --profile obs up -d         → + observability (otel-collector, jaeger, prometheus, grafana)
+#   docker compose --profile load run --rm k6  → load/overselling test
+#
+# Datadog is the conceptual reference: the OTel Collector is where we would swap
+# the local exporters (Jaeger/Prometheus) for the `datadog` exporter in production.
+
+name: casecellshop
+
+x-app-env: &app-env
+  NODE_ENV: development
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  # The shop's own database (read model + orders + outbox)
+  DATABASE_URL: postgres://shop:shop@postgres:5432/shop
+  # Storefront cache, idempotency, single-flight
+  REDIS_URL: redis://redis:6379
+  # SQS-compatible queue (the same SDK works on LocalStack/AWS)
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: local
+  AWS_SECRET_ACCESS_KEY: local
+  SQS_ENDPOINT: http://sqs:9324
+  CHECKOUT_QUEUE_URL: http://sqs:9324/000000000000/checkout-orders
+  CHECKOUT_DLQ_URL: http://sqs:9324/000000000000/checkout-orders-dlq
+  # Simulated ERP
+  ERP_BASE_URL: http://erp-mock:4000
+  ERP_TIMEOUT_MS: ${ERP_TIMEOUT_MS:-2000}
+  # Cache
+  CACHE_TTL_CATALOG_S: ${CACHE_TTL_CATALOG_S:-300}
+  CACHE_TTL_PRICE_S: ${CACHE_TTL_PRICE_S:-60}
+  CACHE_TTL_STOCK_S: ${CACHE_TTL_STOCK_S:-5}
+  CACHE_STALE_IF_ERROR_S: ${CACHE_STALE_IF_ERROR_S:-120}
+  # Telemetry (OpenTelemetry → collector). Without the obs profile the SDK only fails to export; the app keeps running.
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  OTEL_RESOURCE_ATTRIBUTES: deployment.environment=local,service.version=0.1.0
+
+services:
+  # ---------------------------------------------------------------- application
+  api:
+    build: { context: ., target: dev }
+    command: npm run dev:api
+    environment:
+      <<: *app-env
+      PORT: 3000
+      OTEL_SERVICE_NAME: casecellshop-api
+    ports: ["3000:3000"]
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      sqs: { condition: service_started }
+      erp-mock: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  worker:
+    build: { context: ., target: dev }
+    command: npm run dev:worker
+    environment:
+      <<: *app-env
+      METRICS_PORT: 9464
+      OTEL_SERVICE_NAME: casecellshop-worker
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-5}
+    ports: ["9464:9464"]
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      sqs: { condition: service_started }
+      erp-mock: { condition: service_healthy }
+
+  # Simulated ERP: configurable latency, errors and timeouts (also at runtime via /admin/config)
+  erp-mock:
+    build: ./erp-mock
+    environment:
+      PORT: 4000
+      ERP_LATENCY_MS: ${ERP_LATENCY_MS:-300}
+      ERP_JITTER_MS: ${ERP_JITTER_MS:-200}
+      ERP_ERROR_RATE: ${ERP_ERROR_RATE:-0.1}
+      ERP_TIMEOUT_RATE: ${ERP_TIMEOUT_RATE:-0.05}
+      ERP_INVOICE_LATENCY_MS: ${ERP_INVOICE_LATENCY_MS:-1500}
+    ports: ["4000:4000"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------- backing services
+  # The shop's own database (the real ERP is read-only MySQL; only what we own lives here)
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+      POSTGRES_DB: shop
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop -d shop"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # SQS-compatible queue with DLQ (redrive after N receives). UI at http://localhost:9325
+  sqs:
+    image: softwaremill/elasticmq-native:1.6.11
+    ports: ["9324:9324", "9325:9325"]
+    volumes:
+      - ./infra/sqs/elasticmq.conf:/opt/elasticmq.conf:ro
+
+  # ------------------------------------------------- observability (profile obs)
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    profiles: [obs]
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./infra/otel/collector.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+      - "8889:8889" # metrics re-exported for Prometheus
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    profiles: [obs]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports: ["16686:16686"] # traces UI
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    profiles: [obs]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-lifecycle
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    profiles: [obs]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports: ["3001:3000"]
+    depends_on: [prometheus, jaeger]
+
+  # ------------------------------------------------------------ load (profile load)
+  k6:
+    image: grafana/k6:0.54.0
+    profiles: [load]
+    environment:
+      API_URL: http://api:3000
+      SKU: ${K6_SKU:-CASE-IPH15-BLK}
+    volumes:
+      - ./tests/load:/scripts:ro
+    command: ["run", "/scripts/oversell.js"]
+    depends_on: [api]
+
+volumes:
+  pgdata:

@@ -1,0 +1,7 @@
+# Staged files are listed by the host git so this also works when tools run in Docker (no git inside).
+files=$(git diff --cached --name-only --diff-filter=ACMR)
+if [ -n "$files" ]; then
+  # shellcheck disable=SC2086
+  ./scripts/npx.sh biome check --no-errors-on-unmatched --files-ignore-unknown=true $files
+fi
+./scripts/npx.sh tsc --noEmit

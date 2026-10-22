@@ -1,0 +1,60 @@
+# Reference alerts (equivalent to Datadog monitors).
+# Metric names are the contract the application must expose — update this file if the code changes them.
+groups:
+  - name: casecellshop
+    rules:
+      - alert: StorefrontHighLatency
+        expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{route="/products"}[5m]))) > 0.3
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "GET /products p95 above 300ms"
+          runbook: "docs/runbooks/slow-storefront.md"
+
+      - alert: CacheHitRatioLow
+        expr: sum(rate(cache_requests_total{result="hit"}[10m])) / sum(rate(cache_requests_total[10m])) < 0.8
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Storefront cache hit ratio below 80%"
+          runbook: "docs/runbooks/slow-storefront.md"
+
+      - alert: CacheServingStale
+        expr: sum(rate(cache_requests_total{result="stale"}[5m])) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Storefront serving stale data (fallback active) — ERP probably degraded"
+          runbook: "docs/runbooks/erp-degraded.md"
+
+      - alert: CheckoutQueueBacklog
+        expr: checkout_queue_depth{queue="main"} > 100
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Checkout queue backing up — slow workers or degraded ERP"
+          runbook: "docs/runbooks/erp-degraded.md"
+
+      - alert: MessagesInDLQ
+        expr: checkout_queue_depth{queue="dlq"} > 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Orders in the DLQ — permanent invoicing failure"
+          runbook: "docs/runbooks/dlq-growing.md"
+
+      - alert: ErpHighErrorRate
+        expr: sum(rate(erp_requests_total{outcome!="success"}[5m])) / sum(rate(erp_requests_total[5m])) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "More than 5% of ERP calls failing"
+          runbook: "docs/runbooks/erp-degraded.md"
+
+      - alert: PossibleOverselling
+        expr: min(inventory_available) < 0 or sum(increase(stock_reservation_conflicts_total[5m])) > 50
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Negative stock or spike in reservation conflicts"
+          runbook: "docs/runbooks/suspected-oversell.md"

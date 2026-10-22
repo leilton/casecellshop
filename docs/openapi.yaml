@@ -1,0 +1,31 @@
+openapi: 3.1.0
+info:
+  title: CaseCellShop API
+  version: 0.1.0
+  description: Storefront and checkout API. Fill in each path as it is implemented.
+servers:
+  - url: http://localhost:3000
+paths:
+  /health:
+    get:
+      summary: API and dependency health
+      responses:
+        "200": { description: All dependencies ok }
+        "503": { description: At least one dependency degraded }
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      responses:
+        "200": { description: Prometheus text format }
+components:
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: OUT_OF_STOCK }
+            message: { type: string }
