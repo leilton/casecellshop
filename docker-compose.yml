@@ -40,7 +40,7 @@ x-app-env: &app-env
   # `none` unless the obs profile runs (make obs sets otlp): exporting to a missing collector starves DNS lookups.
   OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
-  OTEL_RESOURCE_ATTRIBUTES: deployment.environment=local,service.version=0.2.1
+  OTEL_RESOURCE_ATTRIBUTES: deployment.environment=local,service.version=0.2.2
 
 services:
   # ---------------------------------------------------------------- application
