@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Shared foundation: Zod-validated config, pino logger with correlation context, metrics registry (README
+  contract), span helpers with trace-context propagation, Postgres transaction helper, Redis/SQS clients and
+  an ERP HTTP client with mandatory timeout, error classification and ERP metrics.
+
 ## [0.1.0] - 2026-10-22
 
 ### Added
