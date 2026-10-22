@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-22
+
+### Fixed
+
+- The `incoming request` log line now carries `correlationId`: the correlation context is created in the HTTP
+  server factory, before Fastify logs it. Removes the Fastify `disableRequestLogging` deprecation warning.
+
+### Changed
+
+- `RESERVATION_TTL_S`, `CATALOG_SYNC_INTERVAL_MS`, `RECONCILE_INTERVAL_MS`, `INVOICING_STUCK_AFTER_S` and
+  `INVOICING_LEASE_S` are listed in `.env.example` and passed through `docker-compose.yml`.
+
+### Documentation
+
+- PROMPTS.md, ADR 0007 and the README now say which problems were observed when running the system and which
+  were caught in review while designing the tests; PROMPTS.md has an audit row and a note on how rows 4–7 ran.
+
 ## [0.2.0] - 2026-10-22
 
 ### Added

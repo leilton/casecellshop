@@ -300,7 +300,9 @@ erp-mock/  infra/  docs/
 ## AI usage
 
 AI (Claude) was used throughout, directed and reviewed: [`PROMPTS.md`](PROMPTS.md) records each relevant
-prompt, what was kept and what was corrected or rejected. The most important corrections came from running
-the system rather than reading the code: the DNS starvation behind intermittent `503`s, the duplicate invoice
-possible under concurrent deliveries (fixed with a lease), `text/plain` being accepted, and a Redis client
-that was still connecting turning into `500`s.
+prompt, what was kept and what was corrected or rejected. Corrections that came from running the system: the
+DNS starvation behind intermittent `503`s, `text/plain` bodies being parsed instead of rejected with `415`, and a
+Redis client that was still connecting raising an unclassified error. Corrections that came from review while
+designing the tests (never seen failing, so each now has a test guarding it): the duplicate invoice possible
+under concurrent deliveries (fixed with a lease), cache metrics counted per request, and isolating the tests
+from the running worker.
