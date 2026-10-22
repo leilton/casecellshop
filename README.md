@@ -36,7 +36,7 @@ container).
 ```bash
 make up                         # api, worker, erp-mock, postgres, redis, sqs
 curl localhost:3000/health      # postgres, redis, sqs, erp = ok
-make test                       # 156 tests + coverage (runs inside the api container)
+make test                       # 157 tests + coverage (runs inside the api container)
 make obs                        # + otel-collector, jaeger, prometheus, grafana (exports traces)
 ```
 
@@ -226,7 +226,7 @@ Runbooks: [slow storefront](docs/runbooks/slow-storefront.md), [ERP degraded](do
 
 ## Tests
 
-`make test` runs 156 tests in the api container with a coverage gate (80% lines; currently ~92%). Unit tests
+`make test` runs 157 tests in the api container with a coverage gate (80% lines; currently ~92%). Unit tests
 live next to the code (`src/**/*.test.ts`) and use in-memory fakes; integration tests (`tests/integration/`)
 run against the compose Postgres, Redis and SQS, in an isolated `shop_test` database rebuilt from
 `infra/postgres/init.sql` on every run.
