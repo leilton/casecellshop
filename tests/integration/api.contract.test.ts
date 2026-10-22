@@ -132,6 +132,57 @@ const cases: Case[] = [
       }),
   },
   {
+    name: 'checkout 429',
+    method: 'post',
+    specPath: '/checkout',
+    status: 429,
+    call: async () => {
+      const { app: limited } = await createTestApp(db, redis, new FakeErp([{ sku }]), {
+        checkoutLimits: { rateLimit: { max: 1, windowS: 60 } },
+      });
+      try {
+        const send = () =>
+          limited.inject({
+            method: 'POST',
+            url: '/checkout',
+            headers: { ...json, 'idempotency-key': uniqueId('c') },
+            payload: { items: [{ sku, quantity: 1 }] },
+          });
+        await send();
+        return await send();
+      } finally {
+        await limited.close();
+      }
+    },
+  },
+  {
+    name: 'checkout 503 overloaded',
+    method: 'post',
+    specPath: '/checkout',
+    status: 503,
+    call: async () => {
+      // No slots and no queue: every checkout is shed before the service runs.
+      const { app: full } = await createTestApp(db, redis, new FakeErp([{ sku }]), {
+        checkoutLimits: { max: 1, maxQueue: 0 },
+        checkout: { place: () => new Promise(() => undefined) },
+      });
+      try {
+        const send = () =>
+          full.inject({
+            method: 'POST',
+            url: '/checkout',
+            headers: { ...json, 'idempotency-key': uniqueId('c') },
+            payload: { items: [{ sku, quantity: 1 }] },
+          });
+        void send();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return await send();
+      } finally {
+        await full.close();
+      }
+    },
+  },
+  {
     name: 'order status 200',
     method: 'get',
     specPath: '/orders/{orderId}/status',

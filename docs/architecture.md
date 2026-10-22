@@ -48,6 +48,13 @@ sequenceDiagram
   Note over Q,W: after 5 receives → DLQ → worker looks up once more → INVOICED, or FAILED + stock released
 ```
 
+## Peak protection
+
+Before the transaction above, `POST /checkout` passes two gates ([ADR 0009](adr/0009-checkout-load-shedding.md)): a
+per-client-IP rate limit counted in Redis (`429 RATE_LIMITED`, fails open if Redis is down) and a per-instance
+concurrency cap with a short FIFO wait queue (`503 OVERLOADED`). Both answer with `Retry-After` and reserve
+nothing, so the client retries with the same `Idempotency-Key`.
+
 ## Order states
 
 ```mermaid

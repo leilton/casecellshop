@@ -84,3 +84,11 @@ groups:
         annotations:
           summary: "Negative stock or spike in reservation conflicts"
           runbook: "docs/runbooks/suspected-oversell.md"
+
+      - alert: CheckoutLoadShedding
+        expr: sum(rate(checkout_requests_total{outcome=~"rate_limited|shed"}[5m])) / sum(rate(checkout_requests_total[5m])) > 0.2
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "More than 20% of checkouts rejected by peak protection (429/503)"
+          runbook: "docs/runbooks/checkout-shedding.md"

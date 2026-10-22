@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Checkout peak protection (ADR 0009): per-client-IP rate limit on `POST /checkout` (`@fastify/rate-limit`, Redis
+  counters, fail open) → `429 RATE_LIMITED`; per-instance concurrency cap with a short FIFO wait queue →
+  `503 OVERLOADED`. Both send `Retry-After` and reserve nothing. New config: `TRUST_PROXY`, `CHECKOUT_RATE_LIMIT_*`,
+  `CHECKOUT_MAX_CONCURRENCY`, `CHECKOUT_MAX_QUEUE`, `CHECKOUT_QUEUE_TIMEOUT_MS`.
+- Metrics: `checkout_requests_total{outcome="rate_limited"|"shed"}`, gauges `checkout_inflight` and
+  `checkout_queue_waiting`. Alert `CheckoutLoadShedding` with its runbook.
+- `make load-peak` (`tests/load/peak.js`): a checkout spike plus one abusive client. Measured results are in the README.
+
+### Changed
+
+- `tests/load/oversell.js` sends one `X-Forwarded-For` per virtual user, so each one is its own client for the
+  rate limit.
+
 ## [0.3.1] - 2026-10-22
 
 ### Documentation
