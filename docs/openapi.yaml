@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: CaseCellShop API
-  version: 0.2.2
+  version: 0.3.0
   description: |
     Storefront and checkout API for CaseCellShop.
 
