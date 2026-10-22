@@ -16,7 +16,8 @@ export default defineConfig({
       provider: 'v8',
       include: ['src/**/*.ts'],
       exclude: ['src/**/*.test.ts', 'src/api/server.ts', 'src/worker/index.ts', 'src/observability/**'],
-      reporter: ['text-summary', 'text', 'html'],
+      // json-summary feeds the CI job summary; lcov is for editors and coverage services.
+      reporter: ['text-summary', 'text', 'html', 'json-summary', 'lcov'],
       thresholds: { lines: 80, statements: 80, functions: 80, branches: 70 },
     },
   },

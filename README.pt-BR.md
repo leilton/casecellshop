@@ -1,5 +1,7 @@
 # CaseCellShop — Desafio Técnico Sênior Backend
 
+[![CI](https://github.com/leilton/casecellshop/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/leilton/casecellshop/actions/workflows/ci.yml)
+
 **Português (Brasil)** · [English](README.md)
 
 > Tradução do [README em inglês](README.md), que é a fonte da verdade. ADRs, runbooks e o OpenAPI continuam em
@@ -249,6 +251,12 @@ a partir de `infra/postgres/init.sql` a cada execução.
 | Cliente do ERP | contra o ERP mock de verdade, com falhas forçadas pela API admin dele: 5xx, timeout, 4xx, fatura não idempotente |
 
 O teste de carga do k6 (`make load`) coloca 50 usuários virtuais disputando um SKU, cada um com duplo clique.
+
+A [CI](.github/workflows/ci.yml) roda `npm run check` e `npm test` em todo push e pull request para `main` e
+`develop`, contra service containers de Postgres, Redis e ElasticMQ mais o ERP mock; o relatório de cobertura fica
+como artefato do workflow e os totais aparecem no resumo do job. O `make load` roda sob demanda: dispare o workflow
+manualmente (`workflow_dispatch`) com `load` marcado, e ele também confere no Postgres que nenhuma unidade foi
+vendida a mais.
 
 ## Verificação
 
