@@ -1,5 +1,7 @@
 # CaseCellShop — Senior Backend Technical Challenge
 
+**English** · [Português (Brasil)](README.pt-BR.md)
+
 > Fictional company. 100% local environment: no cloud or Datadog account required.
 
 A small backend that shows how to put a fast, correct storefront and an asynchronous checkout in front of a

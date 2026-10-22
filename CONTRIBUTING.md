@@ -18,6 +18,8 @@ curl localhost:3000/health
 ## Language
 
 Everything is written in **English**: code, identifiers, comments, logs, docs, commit messages and PR descriptions.
+The one exception is `README.pt-BR.md`, a Brazilian Portuguese translation of the README for the challenge
+reviewers. The English `README.md` is the source of truth; change both together.
 
 ## Branching model (Git flow)
 
@@ -104,6 +106,7 @@ git switch main && git switch -c hotfix/erp-timeout
 - [ ] `npm run check` and `npm test` pass.
 - [ ] Tests cover the change (concurrency/idempotency/cache/worker paths where relevant).
 - [ ] `docs/openapi.yaml` updated for API changes.
+- [ ] `README.md` changed? `README.pt-BR.md` updated too (`sh scripts/check-readme-sync.sh` checks the structure).
 - [ ] Metrics match the README contract and `infra/prometheus/alerts.yml`.
 - [ ] ADR added in `docs/adr/` for architectural decisions.
 - [ ] Schema change? Mention that `make reset` is required.
