@@ -363,9 +363,25 @@ describe('operational and unknown routes', () => {
     expect(res.body).not.toContain(placed.orderId);
   });
 
-  it('/openapi.yaml serves the contract', async () => {
+  it('/openapi.yaml serves the contract as text a browser shows instead of downloading', async () => {
     const res = await app.inject({ method: 'GET', url: '/openapi.yaml' });
     expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/plain');
     expect(res.body).toContain('openapi: 3.1.0');
+  });
+
+  it('/docs serves Swagger UI and /docs/json the same contract', async () => {
+    const page = await app.inject({ method: 'GET', url: '/docs/' });
+    expect(page.statusCode).toBe(200);
+    expect(page.headers['content-type']).toContain('text/html');
+    expect(page.body).toContain('Swagger UI');
+
+    const json = await app.inject({ method: 'GET', url: '/docs/json' });
+    expect(json.statusCode).toBe(200);
+    const spec = json.json();
+    expect(spec.openapi).toMatch(/^3\.1/);
+    expect(Object.keys(spec.paths)).toEqual(
+      expect.arrayContaining(['/products', '/checkout', '/orders/{orderId}/status', '/docs']),
+    );
   });
 });
