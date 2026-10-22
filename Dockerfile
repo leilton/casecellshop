@@ -24,6 +24,8 @@ ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm install --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
+# Read at runtime by GET /openapi.yaml and GET /docs
+COPY docs/openapi.yaml ./docs/openapi.yaml
 USER node
 EXPOSE 3000
 CMD ["node", "dist/api/server.js"]

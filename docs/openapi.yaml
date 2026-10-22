@@ -179,12 +179,25 @@ paths:
   /openapi.yaml:
     get:
       tags: [operations]
-      summary: This document
+      summary: This document, as text
+      description: Served as `text/plain` so a browser displays it instead of downloading it.
       responses:
         "200":
           description: OpenAPI document.
           content:
-            application/yaml: { schema: { type: string } }
+            text/plain: { schema: { type: string } }
+  /docs:
+    get:
+      tags: [operations]
+      summary: Interactive documentation (Swagger UI)
+      description: >-
+        Renders this contract and lets you call the API from the browser.
+        `/docs/json` and `/docs/yaml` return the parsed document.
+      responses:
+        "200":
+          description: HTML page.
+          content:
+            text/html: { schema: { type: string } }
 
 components:
   parameters:

@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import http, { type IncomingHttpHeaders } from 'node:http';
 import path from 'node:path';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
 import Fastify, { type FastifyError } from 'fastify';
 import { catalogRoutes } from '../modules/catalog/routes';
 import type { CatalogService } from '../modules/catalog/service';
@@ -131,8 +134,20 @@ export async function buildApp(deps: AppDeps) {
   app.get('/openapi.yaml', async (_req, reply) => {
     const spec = await readFile(openApiPath, 'utf8').catch(() => undefined);
     if (!spec) throw new AppError('ROUTE_NOT_FOUND', 404, 'OpenAPI document not available');
-    return reply.type('application/yaml').send(spec);
+    // text/plain so a browser shows the contract instead of downloading it; tools read it the same way.
+    return reply.type('text/plain; charset=utf-8').send(spec);
   });
+
+  // Interactive docs at /docs, rendered from the same contract file: no per-route annotations to keep in sync.
+  if (existsSync(openApiPath)) {
+    await app.register(swagger, {
+      mode: 'static',
+      specification: { path: openApiPath, baseDir: path.dirname(openApiPath) },
+    });
+    await app.register(swaggerUi, { routePrefix: '/docs', uiConfig: { docExpansion: 'list', deepLinking: true } });
+  } else {
+    deps.logger.warn({ openApiPath }, 'OpenAPI document not found, /docs is disabled');
+  }
 
   await app.register(catalogRoutes, { service: deps.catalog });
   await app.register(checkoutRoutes, { service: deps.checkout });
