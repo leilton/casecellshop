@@ -18,6 +18,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Metrics: `checkout_requests_total{outcome="rate_limited"|"shed"}`, gauges `checkout_inflight` and
   `checkout_queue_waiting`. Alert `CheckoutLoadShedding` with its runbook.
 - `make load-peak` (`tests/load/peak.js`): a checkout spike plus one abusive client. Measured results are in the README.
+- `POST /orders/{orderId}/cancel` (ADR 0010): cancels a `RESERVED` order and releases its stock in the same
+  transaction, under the order row lock the worker also takes; idempotent by state; `409 ORDER_NOT_CANCELLABLE`
+  once invoicing started. Metric `order_cancellations_total{outcome}`.
+- `409 OUT_OF_STOCK` now has `details.items[] = { sku, requested, available }` and a message written for the
+  shopper ("Only 2 left of …"); `details.skus` is kept.
+- Test quality (ADR 0011): fast-check property test for reservations against Postgres; Stryker mutation testing on
+  `checkout` and `invoicing` (`make mutation`, 100% score, fails below 95%), manual CI job with the report as artifact.
 
 ### Changed
 
