@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- GitHub Actions CI: `npm run check` and `npm test` (Postgres, Redis, ElasticMQ services + ERP mock) on every push
+  and PR, coverage report as artifact and job summary, opt-in `make load` job via `workflow_dispatch`; CI badge in
+  both READMEs.
+
 ## [0.3.1] - 2026-10-22
 
 ### Documentation
