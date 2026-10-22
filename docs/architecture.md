@@ -63,7 +63,8 @@ stateDiagram-v2
 
 ## Storefront cache
 
-- Cache-aside in Redis with TTL per data type: catalog `300s`, price `60s`, stock `5s` (`CACHE_TTL_*`).
+- Cache-aside in Redis with TTL per data type: the ERP catalog entry (names + prices arrive together, so its
+  freshness is bounded by price) `60s`, our stock `5s` (`CACHE_TTL_PRICE_S`, `CACHE_TTL_STOCK_S`).
 - **Single-flight:** on a miss, one request takes a short Redis lock and refreshes; others wait briefly or
   get the previous value — prevents a stampede on the ERP.
 - **Stale-if-error:** if the ERP fails, serve the last value for up to `CACHE_STALE_IF_ERROR_S` and count
