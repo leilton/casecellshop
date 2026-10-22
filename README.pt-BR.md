@@ -44,7 +44,7 @@ container).
 ```bash
 make up                         # api, worker, erp-mock, postgres, redis, sqs
 curl localhost:3000/health      # postgres, redis, sqs, erp = ok
-make test                       # 174 testes + cobertura (roda dentro do container da api)
+make test                       # 219 testes + cobertura (roda dentro do container da api)
 make obs                        # + otel-collector, jaeger, prometheus, grafana (exporta traces)
 ```
 
@@ -73,7 +73,8 @@ curl -XPOST localhost:3000/orders/<orderId>/cancel                  # enquanto R
 | http://localhost:3001                       | Dashboard do Grafana, sem login (`make obs`)                  |
 
 Outros alvos: `make chaos` / `make calm` (degrada / restaura o ERP), `make load` (corrida de overselling no k6;
-rode depois de `make reset && make up`), `make reset` (apaga o banco e refaz o seed), `make logs`.
+rode depois de `make reset && make up`), `make load-peak` (pico de checkout contra a proteção de pico),
+`make mutation` (Stryker em checkout + invoicing), `make reset` (apaga o banco e refaz o seed), `make logs`.
 
 ## API
 
@@ -371,7 +372,7 @@ src/
   worker/                    # loops: relay do outbox, consumidores (principal + DLQ), reconciliação, sync, gauges
   modules/
     catalog/                 # cache, service, sync, repository, routes, schemas
-    checkout/  orders/       # POST /checkout, GET /orders/:id/status
+    checkout/  orders/       # POST /checkout, GET /orders/:id/status, POST /orders/:id/cancel
     invoicing/  outbox/      # máquina de estados do worker, relay do outbox
   shared/                    # config, db, redis, sqs, cache store, cliente do ERP, logger, métricas, tracing, erros
   observability/tracing.ts   # bootstrap do OpenTelemetry (primeiro import de todo entrypoint)
