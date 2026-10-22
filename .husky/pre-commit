@@ -5,3 +5,5 @@ if [ -n "$files" ]; then
   ./scripts/npx.sh biome check --no-errors-on-unmatched --files-ignore-unknown=true $files
 fi
 ./scripts/npx.sh tsc --noEmit
+
+sh scripts/check-readme-sync.sh
