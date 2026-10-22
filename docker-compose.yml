@@ -30,6 +30,12 @@ x-app-env: &app-env
   CACHE_TTL_PRICE_S: ${CACHE_TTL_PRICE_S:-60}
   CACHE_TTL_STOCK_S: ${CACHE_TTL_STOCK_S:-5}
   CACHE_STALE_IF_ERROR_S: ${CACHE_STALE_IF_ERROR_S:-120}
+  # Checkout and worker tunables (defaults match src/shared/config.ts)
+  RESERVATION_TTL_S: ${RESERVATION_TTL_S:-900}
+  CATALOG_SYNC_INTERVAL_MS: ${CATALOG_SYNC_INTERVAL_MS:-10000}
+  RECONCILE_INTERVAL_MS: ${RECONCILE_INTERVAL_MS:-30000}
+  INVOICING_STUCK_AFTER_S: ${INVOICING_STUCK_AFTER_S:-120}
+  INVOICING_LEASE_S: ${INVOICING_LEASE_S:-15}
   # Telemetry (OpenTelemetry → collector).
   # `none` unless the obs profile runs (make obs sets otlp): exporting to a missing collector starves DNS lookups.
   OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}

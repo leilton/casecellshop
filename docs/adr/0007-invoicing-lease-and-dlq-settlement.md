@@ -8,7 +8,8 @@
 ADR 0005 makes retries safe by looking the invoice up before creating one. That covers *sequential* retries,
 but SQS delivers at least once and can hand the same message to two consumers at the same time. Both would
 look up, find nothing (the first `POST /invoices` has not returned yet) and both would create an invoice.
-The integration test "two workers processing the same message" reproduced it.
+This was found by reasoning about at-least-once delivery while designing the tests, before any run showed it;
+the integration test "two workers processing the same message concurrently" now guards it (exactly one invoice).
 
 Separately, a message that exhausts its receives lands in the DLQ, and an order can lose its message
 entirely (e.g. the relay published nothing before the reservation expired).
