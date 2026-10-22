@@ -36,12 +36,38 @@ groups:
           runbook: "docs/runbooks/erp-degraded.md"
 
       - alert: MessagesInDLQ
+        # The worker settles dead letters itself (lookup, then FAILED + stock released). A message that STAYS in
+        # the DLQ means that handler cannot settle it — usually the ERP is down for the lookup.
         expr: checkout_queue_depth{queue="dlq"} > 0
-        for: 1m
+        for: 5m
         labels: { severity: critical }
         annotations:
-          summary: "Orders in the DLQ — permanent invoicing failure"
+          summary: "Dead letters not being settled — DLQ handler blocked (ERP lookup failing?)"
           runbook: "docs/runbooks/dlq-growing.md"
+
+      - alert: OrdersFailingInvoicing
+        expr: sum(increase(order_processing_duration_seconds_count{final_status="FAILED"}[15m])) > 0
+        for: 0m
+        labels: { severity: critical }
+        annotations:
+          summary: "Orders failed invoicing after all retries (customers charged nothing, stock released)"
+          runbook: "docs/runbooks/dlq-growing.md"
+
+      - alert: ReservationsExpiring
+        expr: sum(increase(order_processing_duration_seconds_count{final_status="CANCELLED"}[15m])) > 5
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Reconciliation is cancelling reservations — orders are not reaching the worker"
+          runbook: "docs/runbooks/dlq-growing.md"
+
+      - alert: InvoicingTooSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(order_processing_duration_seconds_bucket{final_status="INVOICED"}[15m]))) > 120
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "p95 time from checkout to invoice above the 2 min SLO"
+          runbook: "docs/runbooks/erp-degraded.md"
 
       - alert: ErpHighErrorRate
         expr: sum(rate(erp_requests_total{outcome!="success"}[5m])) / sum(rate(erp_requests_total[5m])) > 0.05

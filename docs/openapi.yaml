@@ -1,31 +1,401 @@
 openapi: 3.1.0
 info:
   title: CaseCellShop API
-  version: 0.1.0
-  description: Storefront and checkout API. Fill in each path as it is implemented.
+  version: 0.2.0
+  description: |
+    Storefront and checkout API for CaseCellShop.
+
+    - `GET /products` is served from a cache in front of a slow ERP. It may return a stale copy when the ERP is
+      down (`meta.stale: true`, `x-cache: stale`).
+    - `POST /checkout` reserves stock atomically and returns `202`; invoicing in the ERP happens asynchronously.
+      Poll `GET /orders/{orderId}/status` (the `Location` header) to follow it.
+    - Every response carries `x-correlation-id` (echoed when sent, generated otherwise). Quote it when reporting
+      a problem: logs, traces and the ERP call for that request share it.
 servers:
   - url: http://localhost:3000
+tags:
+  - name: catalog
+  - name: checkout
+  - name: orders
+  - name: operations
+
 paths:
+  /products:
+    get:
+      tags: [catalog]
+      summary: List products with price and availability
+      operationId: listProducts
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
+        - name: sku
+          in: query
+          required: false
+          description: Return a single product.
+          schema: { $ref: "#/components/schemas/Sku" }
+      responses:
+        "200":
+          description: Product list (possibly stale, see `meta`).
+          headers:
+            x-cache:
+              description: Worst cache result among the product and stock entries.
+              schema: { type: string, enum: [hit, miss, stale] }
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductList" }
+              example:
+                items:
+                  - sku: CASE-IPH15-BLK
+                    name: iPhone 15 Case Black
+                    priceCents: 4990
+                    available: 10
+                    inStock: true
+                    version: 1
+                meta: { stale: false, cache: { products: hit, stock: miss }, productsAgeS: 12, stockAgeS: 0 }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /checkout:
+    post:
+      tags: [checkout]
+      summary: Start a purchase (reserve stock, invoice asynchronously)
+      operationId: checkout
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: |
+            Unique per purchase intent (generate one per "Buy" click and reuse it on retries). The same key with
+            the same items returns the original order; with different items it is rejected with `422`.
+          schema: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9._:-]+$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CheckoutRequest" }
+            example: { items: [{ sku: CASE-IPH15-BLK, quantity: 1 }] }
+      responses:
+        "202":
+          description: Stock reserved; invoicing in progress. Also returned for a repeated request with the same key.
+          headers:
+            Location:
+              description: Order status URL.
+              schema: { type: string }
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheckoutAccepted" }
+        "400":
+          description: Invalid body, invalid JSON or missing/invalid `Idempotency-Key`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                missingKey:
+                  value: { error: { code: MISSING_IDEMPOTENCY_KEY, message: Idempotency-Key header is required } }
+                invalidBody:
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Request is invalid
+                      details: [{ path: items.0.quantity, message: Number must be greater than or equal to 1 }]
+        "409":
+          description: Not enough stock for at least one item. Nothing was reserved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error:
+                  {
+                    code: OUT_OF_STOCK,
+                    message: "Not enough stock for: CASE-S24-RED",
+                    details: { skus: [CASE-S24-RED] },
+                  }
+        "415":
+          description: Content-Type is not `application/json`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: |
+            `IDEMPOTENCY_KEY_REUSED` (same key, different items) or `UNKNOWN_SKU` (sku not in the catalog).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /orders/{orderId}/status:
+    get:
+      tags: [orders]
+      summary: Follow an order through invoicing
+      operationId: getOrderStatus
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Current status and history.
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderStatus" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
   /health:
     get:
+      tags: [operations]
       summary: API and dependency health
       responses:
-        "200": { description: All dependencies ok }
-        "503": { description: At least one dependency degraded }
+        "200":
+          description: All dependencies ok.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: At least one dependency degraded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
   /metrics:
     get:
+      tags: [operations]
       summary: Prometheus metrics
       responses:
-        "200": { description: Prometheus text format }
+        "200":
+          description: Prometheus text format.
+          content:
+            text/plain: { schema: { type: string } }
+  /openapi.yaml:
+    get:
+      tags: [operations]
+      summary: This document
+      responses:
+        "200":
+          description: OpenAPI document.
+          content:
+            application/yaml: { schema: { type: string } }
+
 components:
+  parameters:
+    CorrelationId:
+      name: x-correlation-id
+      in: header
+      required: false
+      description: Propagated to logs, traces, the queue message and ERP calls. Generated when absent or invalid.
+      schema: { type: string, maxLength: 128, pattern: "^[A-Za-z0-9._:-]+$" }
+
+  headers:
+    CorrelationId:
+      description: Correlation id of this request.
+      schema: { type: string }
+
+  responses:
+    ValidationError:
+      description: Invalid parameter or query.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: "`PRODUCT_NOT_FOUND`, `ORDER_NOT_FOUND` or `ROUTE_NOT_FOUND`."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InternalError:
+      description: Unexpected error. No internals are returned; use `x-correlation-id` to find the logs.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: INTERNAL_ERROR, message: Unexpected error } }
+    Unavailable:
+      description: |
+        `CATALOG_UNAVAILABLE` (ERP down and no cached copy) or `DEPENDENCY_UNAVAILABLE` (database or cache down).
+        Safe to retry with backoff; for checkout, reuse the same `Idempotency-Key`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
   schemas:
+    Sku:
+      type: string
+      pattern: "^[A-Z0-9][A-Z0-9-]{0,63}$"
+      example: CASE-IPH15-BLK
+
+    Product:
+      type: object
+      additionalProperties: false
+      required: [sku, name, priceCents, available, inStock, version]
+      properties:
+        sku: { $ref: "#/components/schemas/Sku" }
+        name: { type: string }
+        priceCents: { type: integer, minimum: 0, description: Price in cents (integer, never floats). }
+        available:
+          type: integer
+          minimum: 0
+          description: Advisory. The authoritative check is the reservation at checkout.
+        inStock: { type: boolean }
+        version: { type: integer, minimum: 1, description: ERP version of the product row. }
+
+    CacheResult:
+      type: string
+      enum: [hit, miss, stale]
+
+    ProductList:
+      type: object
+      additionalProperties: false
+      required: [items, meta]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Product" }
+        meta:
+          type: object
+          additionalProperties: false
+          required: [stale, cache, productsAgeS, stockAgeS]
+          properties:
+            stale: { type: boolean, description: True when served from the stale-if-error fallback. }
+            cache:
+              type: object
+              additionalProperties: false
+              required: [products, stock]
+              properties:
+                products: { $ref: "#/components/schemas/CacheResult" }
+                stock: { $ref: "#/components/schemas/CacheResult" }
+            productsAgeS: { type: integer, minimum: 0 }
+            stockAgeS: { type: integer, minimum: 0 }
+
+    CheckoutItem:
+      type: object
+      additionalProperties: false
+      required: [sku, quantity]
+      properties:
+        sku: { $ref: "#/components/schemas/Sku" }
+        quantity: { type: integer, minimum: 1, maximum: 5 }
+
+    CheckoutRequest:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 10
+          description: Each sku at most once.
+          items: { $ref: "#/components/schemas/CheckoutItem" }
+
+    OrderStatusValue:
+      type: string
+      enum: [PENDING, RESERVED, INVOICING, INVOICED, FAILED, CANCELLED]
+
+    CheckoutAccepted:
+      type: object
+      additionalProperties: false
+      required: [orderId, status, statusUrl]
+      properties:
+        orderId: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/OrderStatusValue" }
+        statusUrl: { type: string, example: /orders/0b6d.../status }
+
+    OrderEvent:
+      type: object
+      additionalProperties: false
+      required: [from, to, at]
+      properties:
+        from:
+          oneOf:
+            - { $ref: "#/components/schemas/OrderStatusValue" }
+            - { type: "null" }
+        to: { $ref: "#/components/schemas/OrderStatusValue" }
+        at: { type: string, format: date-time }
+        detail: { type: object }
+
+    OrderStatus:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          orderId,
+          status,
+          totalCents,
+          items,
+          invoiceId,
+          attempts,
+          lastError,
+          reservedUntil,
+          createdAt,
+          updatedAt,
+          history,
+        ]
+      properties:
+        orderId: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/OrderStatusValue" }
+        totalCents: { type: integer, minimum: 0 }
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [sku, quantity, priceCents]
+            properties:
+              sku: { type: string }
+              quantity: { type: integer, minimum: 1 }
+              priceCents: { type: integer, minimum: 0 }
+        invoiceId: { type: [string, "null"] }
+        attempts: { type: integer, minimum: 0, description: Invoicing attempts made by the worker. }
+        lastError: { type: [string, "null"] }
+        reservedUntil: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        history:
+          type: array
+          items: { $ref: "#/components/schemas/OrderEvent" }
+
+    Health:
+      type: object
+      required: [status, deps]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        deps:
+          type: object
+          additionalProperties: { type: string, description: "`ok` or the error message." }
+
     Error:
       type: object
+      additionalProperties: false
       required: [error]
       properties:
         error:
           type: object
+          additionalProperties: false
           required: [code, message]
           properties:
-            code: { type: string, example: OUT_OF_STOCK }
+            code:
+              type: string
+              enum:
+                - VALIDATION_ERROR
+                - INVALID_JSON
+                - MISSING_IDEMPOTENCY_KEY
+                - INVALID_IDEMPOTENCY_KEY
+                - ROUTE_NOT_FOUND
+                - PRODUCT_NOT_FOUND
+                - ORDER_NOT_FOUND
+                - OUT_OF_STOCK
+                - UNSUPPORTED_MEDIA_TYPE
+                - IDEMPOTENCY_KEY_REUSED
+                - UNKNOWN_SKU
+                - CATALOG_UNAVAILABLE
+                - DEPENDENCY_UNAVAILABLE
+                - INTERNAL_ERROR
             message: { type: string }
+            details: {}

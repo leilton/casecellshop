@@ -1,54 +1,93 @@
-// PLACEHOLDER — only proves the environment starts and can reach its dependencies.
-// Replace with the challenge endpoints: GET /products, POST /checkout, GET /orders/:id/status.
-// Tracing MUST be the first import: it instruments http/fastify/pg/ioredis/aws-sdk before they load.
+// Tracing MUST be the first import: it patches http/fastify/pg/ioredis/aws-sdk before they load.
 import '../observability/tracing';
-import { GetQueueAttributesCommand, SQSClient } from '@aws-sdk/client-sqs';
-import Fastify from 'fastify';
-import { Redis } from 'ioredis';
-import pg from 'pg';
-import client from 'prom-client';
+import { GetQueueAttributesCommand } from '@aws-sdk/client-sqs';
+import { createCatalogRepository } from '../modules/catalog/repository';
+import { createCatalogService } from '../modules/catalog/service';
+import { createCheckoutRepository } from '../modules/checkout/repository';
+import { createCheckoutService } from '../modules/checkout/service';
+import { createOrdersRepository } from '../modules/orders/repository';
+import { createOrdersService } from '../modules/orders/service';
+import { createRedisCacheStore } from '../shared/cache-store';
+import { config } from '../shared/config';
+import { createDb } from '../shared/db';
+import { createHttpErpClient } from '../shared/erp';
+import { createLogger } from '../shared/logger';
+import { collectDefaultMetrics } from '../shared/metrics';
+import { createRedis } from '../shared/redis';
+import { createSqs } from '../shared/sqs';
+import { buildApp, type DependencyStatus } from './app';
 
-const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
-const db = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-const redis = new Redis(process.env.REDIS_URL!);
-const sqs = new SQSClient({ endpoint: process.env.SQS_ENDPOINT });
+async function main() {
+  const cfg = config();
+  const logger = createLogger('casecellshop-api', cfg.LOG_LEVEL);
+  collectDefaultMetrics('casecellshop_api_');
 
-client.collectDefaultMetrics({ prefix: 'casecellshop_api_' });
+  const db = createDb(cfg.DATABASE_URL);
+  const redis = createRedis(cfg.REDIS_URL);
+  const sqs = createSqs(cfg);
+  const erp = createHttpErpClient({ baseUrl: cfg.ERP_BASE_URL, timeoutMs: cfg.ERP_TIMEOUT_MS });
 
-async function check(name: string, fn: () => Promise<unknown>) {
-  try {
-    await fn();
-    return [name, 'ok'] as const;
-  } catch (err) {
-    return [name, (err as Error).message] as const;
+  const catalog = createCatalogService({
+    erp,
+    repo: createCatalogRepository(db),
+    store: createRedisCacheStore(redis),
+    logger,
+    ttl: {
+      priceS: cfg.CACHE_TTL_PRICE_S,
+      stockS: cfg.CACHE_TTL_STOCK_S,
+      staleIfErrorS: cfg.CACHE_STALE_IF_ERROR_S,
+      lockMs: cfg.CACHE_LOCK_TTL_MS,
+    },
+  });
+  const checkout = createCheckoutService({
+    repo: createCheckoutRepository(db),
+    catalog,
+    logger,
+    reservationTtlS: cfg.RESERVATION_TTL_S,
+  });
+  const orders = createOrdersService({ repo: createOrdersRepository(db) });
+
+  async function check(fn: () => Promise<unknown>): Promise<string> {
+    try {
+      await fn();
+      return 'ok';
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
   }
+
+  const health = async (): Promise<DependencyStatus> => {
+    const [postgres, redisStatus, queue, erpStatus] = await Promise.all([
+      check(() => db.query('SELECT 1')),
+      check(() => redis.ping()),
+      check(() => sqs.send(new GetQueueAttributesCommand({ QueueUrl: cfg.CHECKOUT_QUEUE_URL }))),
+      check(async () => {
+        const res = await fetch(`${cfg.ERP_BASE_URL}/health`, { signal: AbortSignal.timeout(cfg.ERP_TIMEOUT_MS) });
+        // Always drain the body: an unread undici response keeps its keep-alive socket busy, and the next ERP
+        // call to the same origin can hang on it until its own timeout (seen as intermittent 2s 503s).
+        await res.arrayBuffer();
+        if (!res.ok) throw new Error(`status ${res.status}`);
+      }),
+    ]);
+    return { postgres, redis: redisStatus, sqs: queue, erp: erpStatus };
+  };
+
+  const app = await buildApp({ logger, catalog, checkout, orders, health });
+
+  const shutdown = async (signal: string) => {
+    logger.info({ signal }, 'shutting down');
+    await app.close();
+    await Promise.allSettled([db.end(), redis.quit()]);
+    process.exit(0);
+  };
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  process.once('SIGINT', () => void shutdown('SIGINT'));
+
+  await app.listen({ host: '0.0.0.0', port: cfg.PORT });
 }
 
-app.get('/health', async (_req, reply) => {
-  const results = Object.fromEntries(
-    await Promise.all([
-      check('postgres', () => db.query('select 1')),
-      check('redis', () => redis.ping()),
-      check('sqs', () =>
-        sqs.send(new GetQueueAttributesCommand({ QueueUrl: process.env.CHECKOUT_QUEUE_URL, AttributeNames: ['All'] })),
-      ),
-      check('erp', () =>
-        fetch(`${process.env.ERP_BASE_URL}/health`).then((r) => {
-          if (!r.ok) throw new Error(String(r.status));
-        }),
-      ),
-    ]),
-  );
-  const healthy = Object.values(results).every((v) => v === 'ok');
-  return reply.code(healthy ? 200 : 503).send({ status: healthy ? 'ok' : 'degraded', deps: results });
-});
-
-app.get('/metrics', async (_req, reply) => {
-  reply.header('content-type', client.register.contentType);
-  return client.register.metrics();
-});
-
-app.listen({ host: '0.0.0.0', port: Number(process.env.PORT ?? 3000) }).catch((err) => {
-  app.log.error(err);
+main().catch((err: unknown) => {
+  // The logger may not exist yet (e.g. invalid config), so write the failure directly to stderr.
+  process.stderr.write(`api failed to start: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
   process.exit(1);
 });

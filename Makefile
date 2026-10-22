@@ -3,7 +3,7 @@
 up:      ## core: api, worker, erp-mock, postgres, redis, queue
 	docker compose up -d --build
 obs:     ## core + observability
-	docker compose --profile obs up -d --build
+	OTEL_TRACES_EXPORTER=otlp docker compose --profile obs up -d --build
 down:
 	docker compose --profile obs --profile load down
 reset:   ## stop everything and drop the postgres volume (re-runs the seed)

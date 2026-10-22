@@ -10,6 +10,9 @@ const SKU = __ENV.SKU || 'CASE-IPH15-BLK';
 const accepted = new Counter('checkout_accepted');
 const rejected = new Counter('checkout_out_of_stock');
 
+// 409 (out of stock) is a correct answer under contention, not a failure: only other statuses count as failed.
+http.setResponseCallback(http.expectedStatuses(202, 409));
+
 export const options = {
   scenarios: {
     rush: { executor: 'shared-iterations', vus: 50, iterations: 200, maxDuration: '60s' },
