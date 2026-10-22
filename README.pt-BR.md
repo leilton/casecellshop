@@ -58,6 +58,7 @@ curl localhost:3000/products
 curl -i localhost:3000/checkout -H 'content-type: application/json' -H 'Idempotency-Key: demo-1' \
   -d '{"items":[{"sku":"CASE-IPH15-BLK","quantity":1}]}'          # 202 + Location
 curl localhost:3000/orders/<orderId>/status                         # RESERVED → INVOICING → INVOICED
+curl -XPOST localhost:3000/orders/<orderId>/cancel                  # enquanto RESERVED: CANCELLED, estoque devolvido
 ```
 
 | URL                                         | O quê                                                         |
@@ -84,18 +85,21 @@ interativa em http://localhost:3000/docs (com "Try it out", sem precisar baixar 
 | `GET /products[?sku=]`         | `200` (pode vir velho, `x-cache`)                 | `400`, `404`, `500`, `503`               |
 | `POST /checkout`               | `202 { orderId, status, statusUrl }` + `Location` | `400`, `409`, `415`, `422`, `429`, `500`, `503` |
 | `GET /orders/{orderId}/status` | `200` com histórico                               | `400`, `404`, `500`, `503`               |
+| `POST /orders/{orderId}/cancel` | `200` `CANCELLED` (idempotente)                  | `400`, `404`, `409`, `500`, `503`        |
 
 Todo erro tem o mesmo formato e um `code` estável:
 
 ```json
-{ "error": { "code": "OUT_OF_STOCK", "message": "Not enough stock for: CASE-S24-RED", "details": { "skus": ["CASE-S24-RED"] } } }
+{ "error": { "code": "OUT_OF_STOCK",
+  "message": "Only 2 left of CASE-S24-BLU (you asked for 3). Nothing was reserved; adjust the quantity and try again.",
+  "details": { "skus": ["CASE-S24-BLU"], "items": [{ "sku": "CASE-S24-BLU", "requested": 3, "available": 2 }] } } }
 ```
 
 | Status | Códigos                                                                                   |
 | ------ | ----------------------------------------------------------------------------------------- |
 | 400    | `VALIDATION_ERROR`, `INVALID_JSON`, `MISSING_IDEMPOTENCY_KEY`, `INVALID_IDEMPOTENCY_KEY`  |
 | 404    | `PRODUCT_NOT_FOUND`, `ORDER_NOT_FOUND`, `ROUTE_NOT_FOUND`                                  |
-| 409    | `OUT_OF_STOCK` (nada foi reservado)                                                        |
+| 409    | `OUT_OF_STOCK` (nada foi reservado; `details.items` traz o que resta por SKU), `ORDER_NOT_CANCELLABLE` (o faturamento já começou)    |
 | 415    | `UNSUPPORTED_MEDIA_TYPE`                                                                   |
 | 422    | `IDEMPOTENCY_KEY_REUSED` (mesma chave, outros itens), `UNKNOWN_SKU`                        |
 | 429    | `RATE_LIMITED` (limite de checkouts por cliente; `Retry-After`, nada reservado)             |
@@ -151,8 +155,14 @@ stateDiagram-v2
   INVOICING --> INVOICING: retry (consulta primeiro)
   INVOICING --> INVOICED: fatura criada ou adotada
   INVOICING --> FAILED: DLQ, 4xx do ERP — estoque liberado
-  RESERVED --> CANCELLED: reserva expirada — estoque liberado
+  RESERVED --> CANCELLED: cancelamento pelo cliente ou reserva expirada — estoque liberado
 ```
+
+**Cancelamento.** `POST /orders/{orderId}/cancel` devolve o estoque na hora, sem esperar a reserva expirar. Só é
+permitido enquanto o pedido está `RESERVED`: ele trava a linha do pedido, a mesma trava que o worker pega antes de
+chamar o ERP. Então ou o cancelamento vence e o worker depois confirma a mensagem sem faturar, ou o worker vence e o
+cancelamento recebe `409 ORDER_NOT_CANCELLABLE`. Cancelar duas vezes responde `200` nas duas e libera as unidades
+uma vez só ([ADR 0010](docs/adr/0010-customer-cancellation.md)).
 
 Mais detalhes: [`docs/architecture.md`](docs/architecture.md).
 
@@ -211,6 +221,7 @@ CDN).
 | Consulta antes do retry + lease de faturamento ([ADR 0007](docs/adr/0007-invoicing-lease-and-dlq-settlement.md)) | O endpoint de fatura do ERP não é idempotente | Uma leitura extra no ERP por retry; uma entrega duplicada espera até a lease (15 s) |
 | Cache-aside com janelas fresca/velha, single-flight e sync por versão ([ADR 0006](docs/adr/0006-storefront-cache.md)) | Latência e carga no ERP caem ordens de grandeza sem stampede | Preços podem ter até um intervalo de sync de idade (10 s); cópias velhas são sinalizadas |
 | Rate limit por IP + limite de concorrência por instância com fila curta ([ADR 0009](docs/adr/0009-checkout-load-shedding.md)) | Latência limitada e um `429`/`503` rápido e reenviável em vez de todas as requisições estourarem o timeout juntas | Sob sobrecarga a vazão útil cai (rejeitar também custa CPU); usuários atrás do mesmo NAT dividem a cota |
+| Cancelar só enquanto `RESERVED`, sob a trava da linha do pedido ([ADR 0010](docs/adr/0010-customer-cancellation.md)) | O estoque volta na hora e o cancelamento nunca disputa com uma fatura no ERP | Depois que o faturamento começa o cliente precisa de um fluxo de estorno (fora do escopo) |
 | O estoque exibido é informativo | A reserva é a verificação real; cachear estoque por 5 s é seguro | Um produto pode aparecer "em estoque" e depois receber `409` |
 | Traces exportados só quando há um collector ([ADR 0008](docs/adr/0008-export-traces-only-with-a-collector.md)) | A falta do collector esgotava as resoluções de DNS e causava timeouts de 2 s | Só `make up` não tem interface de traces (os trace ids continuam nos logs) |
 | ElasticMQ como SQS, CommonJS para o OTel ([ADR 0002](docs/adr/0002-elasticmq-as-local-sqs.md), [0003](docs/adr/0003-commonjs-for-otel.md)) | O mesmo código do AWS SDK roda na AWS; a auto-instrumentação exige CJS | — |
@@ -239,6 +250,7 @@ rota):
 | `checkout_queue_depth` | gauge | `queue` = main/dlq |
 | `erp_requests_total` / `erp_request_duration_seconds` | counter / histogram | `operation`, `outcome` = success/error/timeout/client_error |
 | `order_processing_duration_seconds` | histogram | `final_status` = INVOICED/FAILED/CANCELLED |
+| `order_cancellations_total` | counter | `outcome` = cancelled/already_cancelled/not_cancellable/not_found |
 
 **Traces** — auto-instrumentação (HTTP, Fastify, pg, ioredis, AWS SDK) mais spans de negócio: `cache.get`
 (`cache.result`), `stock.reserve`, `outbox.publish`, `order.process`, `erp.lookup`, `erp.invoice`,
@@ -283,7 +295,7 @@ Runbooks: [vitrine lenta](docs/runbooks/slow-storefront.md), [ERP degradado](doc
 
 ## Testes
 
-`make test` roda 174 testes no container da api com um piso de cobertura (80% das linhas; hoje ~92%). Os testes
+`make test` roda 219 testes no container da api com um piso de cobertura (80% das linhas; hoje ~93%). Os testes
 unitários ficam ao lado do código (`src/**/*.test.ts`) e usam fakes em memória; os de integração
 (`tests/integration/`) rodam contra o Postgres, o Redis e o SQS do compose, em um banco `shop_test` isolado, recriado
 a partir de `infra/postgres/init.sql` a cada execução.
@@ -297,16 +309,28 @@ a partir de `infra/postgres/init.sql` a cada execução.
 | HTTP | matriz de status por rota: 200/202, 400 (13 casos de corpo, chave e parâmetro inválidos), 404, 409, 415, 422, 429, 500 (sem vazamento), 503; correlation id; métricas rotuladas pelo padrão da rota |
 | Proteção de pico | `429` além da cota por IP com `Retry-After`, nada reservado; cota compartilhada por duas instâncias via Redis; `X-Forwarded-For` ignorado se não for confiável; Redis fora → fail open; uma requisição na fila roda quando um slot libera; fila cheia ou espera estourada → `503 OVERLOADED` com `Retry-After`, e o retry com a mesma chave recebe o pedido; requisições inválidas nunca ocupam slot; limitador FIFO e slot liberado em caso de erro |
 | Contrato | respostas reais validadas contra os schemas do `docs/openapi.yaml` com o Ajv |
+| Cancelamento | o cancelamento devolve todas as unidades em uma transação; um segundo cancelamento, ou cancelamentos concorrentes, não liberam nada duas vezes; cancelamento disputando com o worker termina `CANCELLED` sem chamar o ERP ou `INVOICED`, nunca os dois; `INVOICED` → `409` |
+| Propriedades da reserva | o fast-check gera cenários aleatórios (estoque 0–8 em 3 SKUs, até 30 compradores concorrentes com carrinhos cruzados, duplos cliques e cancelamentos) contra o Postgres: estoque nunca negativo, `available + reserved` conservado, `reserved` igual aos pedidos vivos, uma chave → um pedido, a única falha é `409` |
 | Cliente do ERP | contra o ERP mock de verdade, com falhas forçadas pela API admin dele: 5xx, timeout, 4xx, fatura não idempotente |
+
+**Qualidade dos testes: testes de mutação.** Cobertura só mostra que uma linha rodou. `make mutation` roda o
+[Stryker](https://stryker-mutator.io) em `checkout` e `invoicing`, os módulos que guardam as três invariantes.
+O Stryker planta pequenos bugs (condições invertidas, guardas removidas, strings esvaziadas) e confere se algum
+teste falha. Score: **100%** (441 de 441 mutantes mortos, cerca de 5 min). A primeira execução deu 69,9%. Os
+sobreviventes mostraram lacunas reais, agora cobertas por testes: adotar uma fatura do ERP duas vezes teria vendido
+o estoque duas vezes, um bug no cliente do ERP teria falhado o pedido e liberado o estoque, e labels de métricas e
+detalhes de eventos não eram conferidos. 76 mutantes em linhas de log e atributos de spans são pulados por um
+pequeno plugin ignorer (`stryker-plugins.mjs`). Mutantes que não mudam comportamento são marcados no código com o
+motivo. A execução falha abaixo de 95% ([ADR 0011](docs/adr/0011-mutation-and-property-testing.md)).
 
 O teste de carga do k6 (`make load`) coloca 50 usuários virtuais disputando um SKU, cada um com duplo clique.
 `make load-peak` roda o pico de checkout descrito em [Proteção de pico no checkout](#proteção-de-pico-no-checkout).
 
 A [CI](.github/workflows/ci.yml) roda `npm run check` e `npm test` em todo push e pull request para `main` e
 `develop`, contra service containers de Postgres, Redis e ElasticMQ mais o ERP mock; o relatório de cobertura fica
-como artefato do workflow e os totais aparecem no resumo do job. O `make load` roda sob demanda: dispare o workflow
-manualmente (`workflow_dispatch`) com `load` marcado, e ele também confere no Postgres que nenhuma unidade foi
-vendida a mais.
+como artefato do workflow e os totais aparecem no resumo do job. O `make load` e o `make mutation` rodam sob demanda:
+dispare o workflow manualmente (`workflow_dispatch`) com `load` (que também confere no Postgres que nenhuma unidade
+foi vendida a mais) ou `mutation` marcado; o relatório de mutação fica como artefato e o score aparece no resumo do job.
 
 ## Verificação
 

@@ -14,3 +14,5 @@ Never edit an accepted ADR's decision — supersede it with a new one and set `S
 | [0007](0007-invoicing-lease-and-dlq-settlement.md)   | Invoicing lease, DLQ settlement and reconciliation         | Accepted |
 | [0008](0008-export-traces-only-with-a-collector.md)  | Export traces only when a collector is running             | Accepted |
 | [0009](0009-checkout-load-shedding.md)               | Checkout peak protection: rate limit and load shedding     | Accepted |
+| [0010](0010-customer-cancellation.md)                | Customer cancellation while RESERVED                       | Accepted |
+| [0011](0011-mutation-and-property-testing.md)        | Mutation and property testing for the invariants           | Accepted |

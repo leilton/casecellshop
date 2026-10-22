@@ -1,4 +1,4 @@
-.PHONY: up obs down reset logs ps test load load-peak chaos calm
+.PHONY: up obs down reset logs ps test mutation load load-peak chaos calm
 
 up:      ## core: api, worker, erp-mock, postgres, redis, queue
 	docker compose up -d --build
@@ -14,6 +14,8 @@ ps:
 	docker compose ps
 test:
 	docker compose exec api npm test
+mutation: ## Stryker on checkout + invoicing (needs `make up`); report in reports/mutation/index.html
+	docker compose run --rm --no-deps -v "$$PWD:/app" -u "$$(id -u):$$(id -g)" -e HOME=/tmp api npm run test:mutation
 load:    ## race for the same SKU (overselling + double click)
 	docker compose --profile load run --rm k6
 load-peak:    ## checkout spike + abusive client against the peak protection (PEAK_RATE=req/s)

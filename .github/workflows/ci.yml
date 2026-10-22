@@ -11,6 +11,10 @@ on:
         description: Also run the k6 overselling + double-click test (make load) on the compose stack
         type: boolean
         default: false
+      mutation:
+        description: Also run Stryker mutation testing on checkout + invoicing (make mutation, ~minutes)
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -139,5 +143,42 @@ jobs:
       - name: Compose logs
         if: failure()
         run: docker compose logs --no-color api worker erp-mock
+      - if: always()
+        run: make down
+
+  mutation:
+    name: Mutation testing (make mutation)
+    if: github.event_name == 'workflow_dispatch' && inputs.mutation
+    needs: [check, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # make mutation mounts the checkout into the api container, so it uses these node_modules.
+      - run: npm ci
+      - run: make up
+      - name: Wait for the API
+        run: |
+          for _ in $(seq 1 60); do curl -sf http://localhost:3000/health > /dev/null && exit 0; sleep 2; done
+          exit 1
+      - run: make mutation
+      - name: Mutation score
+        if: always() && hashFiles('reports/mutation/mutation.json') != ''
+        run: |
+          jq -r '[.files[].mutants[]] | (map(select(.status == "Killed" or .status == "Timeout")) | length) as $k
+            | (map(select(.status == "Survived" or .status == "NoCoverage")) | length) as $s
+            | "### Mutation score\n\(($k * 10000 / ($k + $s) | floor) / 100)% (\($k) killed, \($s) survived or uncovered)"' \
+            reports/mutation/mutation.json >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-report
+          path: reports/mutation/
+          retention-days: 14
+          if-no-files-found: ignore
       - if: always()
         run: make down

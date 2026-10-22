@@ -4,12 +4,14 @@ import type { CatalogService } from '../../src/modules/catalog/service';
 import type { CheckoutService } from '../../src/modules/checkout/service';
 import type { OrdersService } from '../../src/modules/orders/service';
 import type { Db } from '../../src/shared/db';
+import { checkoutRequests } from '../../src/shared/metrics';
 import type { RedisClient } from '../../src/shared/redis';
 import { createTestApp, createTestRedis } from '../support/app';
 import { createTestDb, Fixtures } from '../support/db';
 import { uniqueId } from '../support/env';
 import { FakeErp } from '../support/fake-erp';
 import { connectionRefused } from '../support/fakes';
+import { counterValue } from '../support/metrics';
 
 let db: Db;
 let redis: RedisClient;
@@ -189,6 +191,37 @@ describe('POST /checkout', () => {
       payload: JSON.stringify({ items: [{ sku, quantity: 1 }] }),
     });
     expectError(res, 400, 'MISSING_IDEMPOTENCY_KEY');
+    expect(res.json().error.message).toBe('Idempotency-Key header is required');
+  });
+
+  it('counts every 400 as an invalid checkout, and a 409 is not counted as shed', async () => {
+    const invalid = await counterValue(checkoutRequests, { outcome: 'invalid' });
+    const shed = await counterValue(checkoutRequests, { outcome: 'shed' });
+
+    await checkout({ items: [] });
+    await checkout({ items: [{ sku: emptySku, quantity: 1 }] });
+
+    expect(await counterValue(checkoutRequests, { outcome: 'invalid' })).toBe(invalid + 1);
+    expect(await counterValue(checkoutRequests, { outcome: 'shed' })).toBe(shed);
+  });
+
+  it('explains what is wrong with the key and the body', async () => {
+    const badKey = await checkout({ items: [{ sku, quantity: 1 }] }, { 'idempotency-key': 'key with spaces' });
+    expect(badKey.json().error).toMatchObject({
+      message: 'Idempotency-Key header is invalid',
+      details: [expect.objectContaining({ message: 'only letters, digits and . _ : - are allowed' })],
+    });
+
+    const duplicated = await checkout({
+      items: [
+        { sku, quantity: 1 },
+        { sku, quantity: 1 },
+      ],
+    });
+    expect(duplicated.json().error).toMatchObject({
+      message: 'Request is invalid',
+      details: [expect.objectContaining({ message: 'each sku may appear only once; use quantity instead' })],
+    });
   });
 
   it.each([
@@ -253,7 +286,7 @@ describe('POST /checkout', () => {
     expectError(res, 415, 'UNSUPPORTED_MEDIA_TYPE');
   });
 
-  it('409 OUT_OF_STOCK lists the SKUs and reserves nothing', async () => {
+  it('409 OUT_OF_STOCK says what is left per SKU and reserves nothing', async () => {
     const res = await checkout({
       items: [
         { sku, quantity: 1 },
@@ -262,8 +295,25 @@ describe('POST /checkout', () => {
     });
 
     expectError(res, 409, 'OUT_OF_STOCK');
-    expect(res.json().error.details).toEqual({ skus: [emptySku] });
+    expect(res.json().error.details).toEqual({
+      skus: [emptySku],
+      items: [{ sku: emptySku, requested: 1, available: 0 }],
+    });
+    expect(res.json().error.message).toBe(
+      `${emptySku} is sold out. Nothing was reserved; adjust the quantity and try again.`,
+    );
     expect(await fx.inventory(sku)).toEqual({ available: 5, reserved: 0 });
+  });
+
+  it('409 OUT_OF_STOCK tells how many are left when the cart asks for more', async () => {
+    expect((await checkout({ items: [{ sku, quantity: 3 }] })).statusCode).toBe(202);
+
+    const res = await checkout({ items: [{ sku, quantity: 4 }] });
+
+    expectError(res, 409, 'OUT_OF_STOCK');
+    expect(res.json().error.details.items).toEqual([{ sku, requested: 4, available: 2 }]);
+    expect(res.json().error.message).toMatch(`Only 2 left of ${sku} (you asked for 4)`);
+    expect(await fx.inventory(sku)).toEqual({ available: 2, reserved: 3 });
   });
 
   it('422 IDEMPOTENCY_KEY_REUSED for the same key with a different payload', async () => {
@@ -326,6 +376,43 @@ describe('GET /orders/:id/status', () => {
       500,
       'INTERNAL_ERROR',
     );
+  });
+});
+
+describe('POST /orders/:id/cancel', () => {
+  const cancel = (orderId: string) => app.inject({ method: 'POST', url: `/orders/${orderId}/cancel` });
+
+  it('200 CANCELLED, stock back on the shelf, and the same answer on a retry (no-store)', async () => {
+    const placed = (await checkout({ items: [{ sku, quantity: 2 }] })).json();
+
+    const first = await cancel(placed.orderId);
+    const second = await cancel(placed.orderId);
+
+    expect(first.statusCode).toBe(200);
+    expect(first.headers['cache-control']).toBe('no-store');
+    expect(first.json()).toMatchObject({ orderId: placed.orderId, status: 'CANCELLED' });
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toEqual(first.json());
+    expect(await fx.inventory(sku)).toEqual({ available: 5, reserved: 0 });
+  });
+
+  it('409 ORDER_NOT_CANCELLABLE once invoicing has started', async () => {
+    const placed = (await checkout({ items: [{ sku, quantity: 1 }] })).json();
+    await db.query(`UPDATE orders SET status = 'INVOICING' WHERE id = $1`, [placed.orderId]);
+
+    const res = await cancel(placed.orderId);
+
+    expectError(res, 409, 'ORDER_NOT_CANCELLABLE');
+    expect(res.json().error.details).toEqual({ status: 'INVOICING' });
+    expect(await fx.inventory(sku)).toEqual({ available: 4, reserved: 1 });
+  });
+
+  it('400 VALIDATION_ERROR for an id that is not a UUID', async () => {
+    expectError(await cancel('123'), 400, 'VALIDATION_ERROR');
+  });
+
+  it('404 ORDER_NOT_FOUND for an unknown UUID', async () => {
+    expectError(await cancel('2f1e0d9c-8b7a-4695-8473-625140302f1e'), 404, 'ORDER_NOT_FOUND');
   });
 });
 

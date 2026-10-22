@@ -130,4 +130,5 @@ git switch main && git switch -c hotfix/erp-timeout
 make chaos                        # 30% ERP errors + 20% timeouts
 make calm
 make reset && make up && make load  # overselling + double click race
+make mutation                     # Stryker on checkout + invoicing (needs make up); fails below 95%
 ```

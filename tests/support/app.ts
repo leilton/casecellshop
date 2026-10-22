@@ -33,7 +33,7 @@ export function createServices(db: Db, redis: RedisClient, erp: FakeErp, reserva
     logger: silentLogger,
     reservationTtlS,
   });
-  const orders = createOrdersService({ repo: createOrdersRepository(db) });
+  const orders = createOrdersService({ repo: createOrdersRepository(db), logger: silentLogger });
   return { catalog, checkout, orders };
 }
 

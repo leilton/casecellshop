@@ -79,7 +79,12 @@ describe('POST /checkout rate limit (per client IP, Redis counters)', () => {
 
     const limited = await checkout(app);
     expect(limited.statusCode).toBe(429);
-    expect(limited.json()).toEqual({ error: { code: 'RATE_LIMITED', message: expect.any(String) } });
+    expect(limited.json()).toEqual({
+      error: {
+        code: 'RATE_LIMITED',
+        message: expect.stringMatching(/^Too many checkout attempts, retry in \d+ \w+$/),
+      },
+    });
     expect(Number(limited.headers['retry-after'])).toBeGreaterThan(0);
     expect(limited.headers['x-ratelimit-limit']).toBe('2');
     expect(limited.headers['x-correlation-id']).toEqual(expect.any(String));

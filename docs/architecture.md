@@ -10,7 +10,7 @@ overload the ERP, oversell stock or create duplicate invoices.
 
 | Component                                      | Responsibility                                                                                       |
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `api`                                          | `GET /products` (cached), `POST /checkout` (reserve + enqueue), `GET /orders/:id/status`, `/metrics` |
+| `api`                                          | `GET /products` (cached), `POST /checkout` (reserve + enqueue), `GET /orders/:id/status`, `POST /orders/:id/cancel` (release while `RESERVED`), `/metrics` |
 | `worker`                                       | Outbox relay → SQS, SQS consumer → ERP invoicing with retry/lookup, DLQ handling, reconciliation     |
 | Postgres                                       | Shop-owned data: storefront read model, inventory/reservations, orders, outbox, order events         |
 | Redis                                          | Storefront cache and single-flight locks (idempotency lives in Postgres, ADR 0005)                   |
@@ -65,6 +65,7 @@ stateDiagram-v2
   INVOICING --> INVOICING: retry (lookup first)
   INVOICING --> FAILED: DLQ settlement or ERP 4xx — stock released
   RESERVED --> CANCELLED: reservation expired without invoice (reconciliation) — stock released
+  RESERVED --> CANCELLED: customer cancel (POST /orders/:id/cancel) — stock released
   FAILED --> [*]
   INVOICED --> [*]
   CANCELLED --> [*]
@@ -81,6 +82,15 @@ stateDiagram-v2
 - Displayed stock is advisory; the authoritative check is the reservation in Postgres.
 - **Invalidation:** the worker polls the ERP catalog every `CATALOG_SYNC_INTERVAL_MS`; a higher `version` updates
   the read model (checkout prices) and evicts the cache entry ([ADR 0006](adr/0006-storefront-cache.md)).
+
+## Customer cancellation
+
+`POST /orders/:id/cancel` locks the order row (`FOR UPDATE`), and only a `RESERVED` order moves to `CANCELLED`, with
+its units returned to `available` and an `order_events` row in the same transaction. The worker's `startAttempt`
+takes the same lock and sets `INVOICING` before calling the ERP, so a cancel and an invoice can never both happen.
+A message already in SQS for a cancelled order finds a terminal status and is acked without an ERP call. Repeating
+the cancel returns `200` and changes nothing; `INVOICING`/`INVOICED`/`FAILED` → `409 ORDER_NOT_CANCELLABLE`
+([ADR 0010](adr/0010-customer-cancellation.md)).
 
 ## Reconciliation
 
