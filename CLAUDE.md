@@ -12,6 +12,8 @@ through a cache; checkout reserves stock in our own Postgres and hands invoicing
 ## Language
 
 All code, identifiers, comments, log/error messages, docs, skills and commit messages are in **English**.
+Exception: `README.pt-BR.md` is the Brazilian Portuguese translation of the README for the challenge reviewers;
+the English `README.md` is the source of truth and both change in the same commit.
 
 ## Commands
 
