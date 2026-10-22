@@ -8,6 +8,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- GitHub Actions CI: `npm run check` and `npm test` (Postgres, Redis, ElasticMQ services + ERP mock) on every push
+  and PR, coverage report as artifact and job summary, opt-in `make load` job via `workflow_dispatch`; CI badge in
+  both READMEs.
 - Checkout peak protection (ADR 0009): per-client-IP rate limit on `POST /checkout` (`@fastify/rate-limit`, Redis
   counters, fail open) → `429 RATE_LIMITED`; per-instance concurrency cap with a short FIFO wait queue →
   `503 OVERLOADED`. Both send `Retry-After` and reserve nothing. New config: `TRUST_PROXY`, `CHECKOUT_RATE_LIMIT_*`,

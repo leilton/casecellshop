@@ -1,5 +1,7 @@
 # CaseCellShop — Desafio Técnico Sênior Backend
 
+[![CI](https://github.com/leilton/casecellshop/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/leilton/casecellshop/actions/workflows/ci.yml)
+
 **Português (Brasil)** · [English](README.md)
 
 > Tradução do [README em inglês](README.md), que é a fonte da verdade. ADRs, runbooks e o OpenAPI continuam em
@@ -42,7 +44,7 @@ container).
 ```bash
 make up                         # api, worker, erp-mock, postgres, redis, sqs
 curl localhost:3000/health      # postgres, redis, sqs, erp = ok
-make test                       # 157 testes + cobertura (roda dentro do container da api)
+make test                       # 174 testes + cobertura (roda dentro do container da api)
 make obs                        # + otel-collector, jaeger, prometheus, grafana (exporta traces)
 ```
 
@@ -299,6 +301,12 @@ a partir de `infra/postgres/init.sql` a cada execução.
 
 O teste de carga do k6 (`make load`) coloca 50 usuários virtuais disputando um SKU, cada um com duplo clique.
 `make load-peak` roda o pico de checkout descrito em [Proteção de pico no checkout](#proteção-de-pico-no-checkout).
+
+A [CI](.github/workflows/ci.yml) roda `npm run check` e `npm test` em todo push e pull request para `main` e
+`develop`, contra service containers de Postgres, Redis e ElasticMQ mais o ERP mock; o relatório de cobertura fica
+como artefato do workflow e os totais aparecem no resumo do job. O `make load` roda sob demanda: dispare o workflow
+manualmente (`workflow_dispatch`) com `load` marcado, e ele também confere no Postgres que nenhuma unidade foi
+vendida a mais.
 
 ## Verificação
 

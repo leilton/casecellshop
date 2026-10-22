@@ -1,5 +1,7 @@
 # CaseCellShop — Senior Backend Technical Challenge
 
+[![CI](https://github.com/leilton/casecellshop/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/leilton/casecellshop/actions/workflows/ci.yml)
+
 **English** · [Português (Brasil)](README.pt-BR.md)
 
 > Fictional company. 100% local environment: no cloud or Datadog account required.
@@ -39,7 +41,7 @@ container).
 ```bash
 make up                         # api, worker, erp-mock, postgres, redis, sqs
 curl localhost:3000/health      # postgres, redis, sqs, erp = ok
-make test                       # 157 tests + coverage (runs inside the api container)
+make test                       # 174 tests + coverage (runs inside the api container)
 make obs                        # + otel-collector, jaeger, prometheus, grafana (exports traces)
 ```
 
@@ -292,6 +294,11 @@ run against the compose Postgres, Redis and SQS, in an isolated `shop_test` data
 
 The k6 test (`make load`) races 50 virtual users for one SKU, each with a double click. `make load-peak` runs
 the checkout spike described in [Peak protection at checkout](#peak-protection-at-checkout).
+
+[CI](.github/workflows/ci.yml) runs `npm run check` and `npm test` on every push and pull request to `main` and
+`develop`, against Postgres, Redis and ElasticMQ service containers plus the ERP mock; the coverage report is a
+workflow artifact and its totals land in the job summary. `make load` runs on demand: trigger the workflow
+manually (`workflow_dispatch`) with `load` checked, and it also asserts in Postgres that no unit was oversold.
 
 ## Verification
 

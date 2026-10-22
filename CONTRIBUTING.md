@@ -94,6 +94,17 @@ git switch main && git switch -c hotfix/erp-timeout
 | `commit-msg` | `commitlint`                               |
 | `pre-push`   | blocks direct pushes to `main` / `develop` |
 
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and pull request to `main` / `develop`:
+
+- `check`: `npm run check` (Biome, `tsc`, README sync).
+- `test`: `npm test` against Postgres, Redis and ElasticMQ service containers plus the ERP mock started from
+  `erp-mock/server.mjs`. The coverage gate fails the job; the report is uploaded as the `coverage-report` artifact
+  and the totals are written to the job summary.
+- `load` (manual only): Actions → CI → _Run workflow_ with `load` checked. Brings the compose stack up with
+  `make reset && make up`, runs `make load` and asserts in Postgres that the SKU was not oversold.
+
 ## Code style
 
 - Biome formats and lints (`npm run format`, `npm run lint`). Don't fight the formatter.
