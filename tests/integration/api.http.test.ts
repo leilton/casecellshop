@@ -4,12 +4,14 @@ import type { CatalogService } from '../../src/modules/catalog/service';
 import type { CheckoutService } from '../../src/modules/checkout/service';
 import type { OrdersService } from '../../src/modules/orders/service';
 import type { Db } from '../../src/shared/db';
+import { checkoutRequests } from '../../src/shared/metrics';
 import type { RedisClient } from '../../src/shared/redis';
 import { createTestApp, createTestRedis } from '../support/app';
 import { createTestDb, Fixtures } from '../support/db';
 import { uniqueId } from '../support/env';
 import { FakeErp } from '../support/fake-erp';
 import { connectionRefused } from '../support/fakes';
+import { counterValue } from '../support/metrics';
 
 let db: Db;
 let redis: RedisClient;
@@ -189,6 +191,37 @@ describe('POST /checkout', () => {
       payload: JSON.stringify({ items: [{ sku, quantity: 1 }] }),
     });
     expectError(res, 400, 'MISSING_IDEMPOTENCY_KEY');
+    expect(res.json().error.message).toBe('Idempotency-Key header is required');
+  });
+
+  it('counts every 400 as an invalid checkout, and a 409 is not counted as shed', async () => {
+    const invalid = await counterValue(checkoutRequests, { outcome: 'invalid' });
+    const shed = await counterValue(checkoutRequests, { outcome: 'shed' });
+
+    await checkout({ items: [] });
+    await checkout({ items: [{ sku: emptySku, quantity: 1 }] });
+
+    expect(await counterValue(checkoutRequests, { outcome: 'invalid' })).toBe(invalid + 1);
+    expect(await counterValue(checkoutRequests, { outcome: 'shed' })).toBe(shed);
+  });
+
+  it('explains what is wrong with the key and the body', async () => {
+    const badKey = await checkout({ items: [{ sku, quantity: 1 }] }, { 'idempotency-key': 'key with spaces' });
+    expect(badKey.json().error).toMatchObject({
+      message: 'Idempotency-Key header is invalid',
+      details: [expect.objectContaining({ message: 'only letters, digits and . _ : - are allowed' })],
+    });
+
+    const duplicated = await checkout({
+      items: [
+        { sku, quantity: 1 },
+        { sku, quantity: 1 },
+      ],
+    });
+    expect(duplicated.json().error).toMatchObject({
+      message: 'Request is invalid',
+      details: [expect.objectContaining({ message: 'each sku may appear only once; use quantity instead' })],
+    });
   });
 
   it.each([

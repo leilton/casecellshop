@@ -11,7 +11,7 @@ function setup(result: (input: PlaceOrderInput) => PlaceOrderResult) {
   const placeOrder = vi.fn(async (input: PlaceOrderInput) => result(input));
   const repo: CheckoutRepository = { placeOrder };
   const priceFor = vi.fn(async (skus: string[]) =>
-    skus.filter((s) => s !== 'CASE-UNKNOWN').map((sku) => ({ sku, name: sku, priceCents: 2500 })),
+    skus.filter((s) => !s.startsWith('CASE-UNKNOWN')).map((sku) => ({ sku, name: sku, priceCents: 2500 })),
   );
   const service = createCheckoutService({ repo, catalog: { priceFor }, logger: silentLogger, reservationTtlS: 900 });
   return { service, placeOrder, priceFor };
@@ -116,19 +116,36 @@ describe('checkout service', () => {
       status: 'RESERVED',
       requestHash: 'other',
     }));
+    const before = await counterValue(checkoutRequests, { outcome: 'invalid' });
 
-    await expect(service.place(cmd())).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED', httpStatus: 422 });
+    await expect(service.place(cmd())).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_KEY_REUSED',
+      httpStatus: 422,
+      message: 'This Idempotency-Key was already used with a different payload',
+    });
+    expect(await counterValue(checkoutRequests, { outcome: 'invalid' })).toBe(before + 1);
   });
 
   it('rejects unknown SKUs before touching stock (422)', async () => {
     const { service, placeOrder } = setup(() => ({ kind: 'created', orderId: ORDER_ID, status: 'RESERVED' }));
+    const before = await counterValue(checkoutRequests, { outcome: 'invalid' });
 
-    await expect(service.place(cmd([{ sku: 'CASE-UNKNOWN', quantity: 1 }]))).rejects.toMatchObject({
+    await expect(
+      service.place(
+        cmd([
+          { sku: 'CASE-UNKNOWN', quantity: 1 },
+          { sku: 'CASE-A', quantity: 1 },
+          { sku: 'CASE-UNKNOWN-2', quantity: 1 },
+        ]),
+      ),
+    ).rejects.toMatchObject({
       code: 'UNKNOWN_SKU',
       httpStatus: 422,
-      details: { skus: ['CASE-UNKNOWN'] },
+      message: 'Unknown sku: CASE-UNKNOWN, CASE-UNKNOWN-2',
+      details: { skus: ['CASE-UNKNOWN', 'CASE-UNKNOWN-2'] },
     });
     expect(placeOrder).not.toHaveBeenCalled();
+    expect(await counterValue(checkoutRequests, { outcome: 'invalid' })).toBe(before + 1);
   });
 
   it('maps a failed reservation to 409 with what is left per SKU and counts a conflict per SKU', async () => {
@@ -140,6 +157,7 @@ describe('checkout service', () => {
     const before = {
       a: await counterValue(stockReservationConflicts, { sku: 'CASE-A' }),
       b: await counterValue(stockReservationConflicts, { sku: 'CASE-B' }),
+      outcome: await counterValue(checkoutRequests, { outcome: 'out_of_stock' }),
     };
 
     await expect(
@@ -156,6 +174,7 @@ describe('checkout service', () => {
     });
     expect(await counterValue(stockReservationConflicts, { sku: 'CASE-A' })).toBe(before.a + 1);
     expect(await counterValue(stockReservationConflicts, { sku: 'CASE-B' })).toBe(before.b + 1);
+    expect(await counterValue(checkoutRequests, { outcome: 'out_of_stock' })).toBe(before.outcome + 1);
   });
 
   it('propagates repository failures unchanged', async () => {

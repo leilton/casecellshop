@@ -288,7 +288,7 @@ Runbooks: [slow storefront](docs/runbooks/slow-storefront.md), [ERP degraded](do
 
 ## Tests
 
-`make test` runs 174 tests in the api container with a coverage gate (80% lines; currently ~92%). Unit tests
+`make test` runs 219 tests in the api container with a coverage gate (80% lines; currently ~93%). Unit tests
 live next to the code (`src/**/*.test.ts`) and use in-memory fakes; integration tests (`tests/integration/`)
 run against the compose Postgres, Redis and SQS, in an isolated `shop_test` database rebuilt from
 `infra/postgres/init.sql` on every run.
@@ -302,15 +302,28 @@ run against the compose Postgres, Redis and SQS, in an isolated `shop_test` data
 | HTTP | status matrix per route: 200/202, 400 (13 invalid bodies, key and param cases), 404, 409, 415, 422, 429, 500 (no leak), 503; correlation id; metrics labelled by route pattern |
 | Peak protection | `429` past the per-IP budget with `Retry-After`, nothing reserved; budget shared by two instances through Redis; `X-Forwarded-For` ignored unless trusted; Redis down → fail open; a queued request runs when a slot frees; queue full or wait timeout → `503 OVERLOADED` with `Retry-After`, and a retry with the same key gets the order; invalid requests never take a slot; limiter FIFO and slot release on error |
 | Contract | real responses validated against `docs/openapi.yaml` schemas with Ajv |
+| Cancellation | cancel gives every unit back in one transaction; a second or concurrent cancel releases nothing twice; cancel racing the worker ends either `CANCELLED` with no ERP call or `INVOICED`, never both; `INVOICED` → `409` |
+| Reservation properties | fast-check generates random scenarios (stock 0–8 on 3 SKUs, up to 30 concurrent shoppers with crossed carts, double clicks and cancels) against Postgres: stock never negative, `available + reserved` conserved, `reserved` equals the live orders, one key → one order, the only failure is `409` |
 | ERP client | against the real ERP mock, failures forced through its admin API: 5xx, timeout, 4xx, non-idempotent invoice |
+
+**Test quality: mutation testing.** Coverage only shows that a line ran. `make mutation` runs
+[Stryker](https://stryker-mutator.io) on `checkout` and `invoicing`, the modules that hold the three invariants.
+Stryker plants small bugs (flipped conditions, removed guards, emptied strings) and checks that some test fails.
+Score: **100%** (441 of 441 mutants killed, about 5 min). The first run scored 69.9%. The survivors it showed were
+real gaps, now covered by tests: adopting an ERP invoice twice would have sold the stock twice, a bug in the ERP
+client would have failed the order and released stock, and metric labels and event details were not checked.
+76 mutants in log lines and trace span attributes are skipped by a small ignorer plugin (`stryker-plugins.mjs`).
+Mutants that cannot change behaviour are marked inline with a reason. The run fails below 95%
+([ADR 0011](docs/adr/0011-mutation-and-property-testing.md)).
 
 The k6 test (`make load`) races 50 virtual users for one SKU, each with a double click. `make load-peak` runs
 the checkout spike described in [Peak protection at checkout](#peak-protection-at-checkout).
 
 [CI](.github/workflows/ci.yml) runs `npm run check` and `npm test` on every push and pull request to `main` and
 `develop`, against Postgres, Redis and ElasticMQ service containers plus the ERP mock; the coverage report is a
-workflow artifact and its totals land in the job summary. `make load` runs on demand: trigger the workflow
-manually (`workflow_dispatch`) with `load` checked, and it also asserts in Postgres that no unit was oversold.
+workflow artifact and its totals land in the job summary. `make load` and `make mutation` run on demand: trigger the
+workflow manually (`workflow_dispatch`) with `load` (which also asserts in Postgres that no unit was oversold) or
+`mutation` checked; the mutation report is a workflow artifact and its score lands in the job summary.
 
 ## Verification
 

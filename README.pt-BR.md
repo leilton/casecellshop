@@ -295,7 +295,7 @@ Runbooks: [vitrine lenta](docs/runbooks/slow-storefront.md), [ERP degradado](doc
 
 ## Testes
 
-`make test` roda 174 testes no container da api com um piso de cobertura (80% das linhas; hoje ~92%). Os testes
+`make test` roda 219 testes no container da api com um piso de cobertura (80% das linhas; hoje ~93%). Os testes
 unitários ficam ao lado do código (`src/**/*.test.ts`) e usam fakes em memória; os de integração
 (`tests/integration/`) rodam contra o Postgres, o Redis e o SQS do compose, em um banco `shop_test` isolado, recriado
 a partir de `infra/postgres/init.sql` a cada execução.
@@ -309,16 +309,28 @@ a partir de `infra/postgres/init.sql` a cada execução.
 | HTTP | matriz de status por rota: 200/202, 400 (13 casos de corpo, chave e parâmetro inválidos), 404, 409, 415, 422, 429, 500 (sem vazamento), 503; correlation id; métricas rotuladas pelo padrão da rota |
 | Proteção de pico | `429` além da cota por IP com `Retry-After`, nada reservado; cota compartilhada por duas instâncias via Redis; `X-Forwarded-For` ignorado se não for confiável; Redis fora → fail open; uma requisição na fila roda quando um slot libera; fila cheia ou espera estourada → `503 OVERLOADED` com `Retry-After`, e o retry com a mesma chave recebe o pedido; requisições inválidas nunca ocupam slot; limitador FIFO e slot liberado em caso de erro |
 | Contrato | respostas reais validadas contra os schemas do `docs/openapi.yaml` com o Ajv |
+| Cancelamento | o cancelamento devolve todas as unidades em uma transação; um segundo cancelamento, ou cancelamentos concorrentes, não liberam nada duas vezes; cancelamento disputando com o worker termina `CANCELLED` sem chamar o ERP ou `INVOICED`, nunca os dois; `INVOICED` → `409` |
+| Propriedades da reserva | o fast-check gera cenários aleatórios (estoque 0–8 em 3 SKUs, até 30 compradores concorrentes com carrinhos cruzados, duplos cliques e cancelamentos) contra o Postgres: estoque nunca negativo, `available + reserved` conservado, `reserved` igual aos pedidos vivos, uma chave → um pedido, a única falha é `409` |
 | Cliente do ERP | contra o ERP mock de verdade, com falhas forçadas pela API admin dele: 5xx, timeout, 4xx, fatura não idempotente |
+
+**Qualidade dos testes: testes de mutação.** Cobertura só mostra que uma linha rodou. `make mutation` roda o
+[Stryker](https://stryker-mutator.io) em `checkout` e `invoicing`, os módulos que guardam as três invariantes.
+O Stryker planta pequenos bugs (condições invertidas, guardas removidas, strings esvaziadas) e confere se algum
+teste falha. Score: **100%** (441 de 441 mutantes mortos, cerca de 5 min). A primeira execução deu 69,9%. Os
+sobreviventes mostraram lacunas reais, agora cobertas por testes: adotar uma fatura do ERP duas vezes teria vendido
+o estoque duas vezes, um bug no cliente do ERP teria falhado o pedido e liberado o estoque, e labels de métricas e
+detalhes de eventos não eram conferidos. 76 mutantes em linhas de log e atributos de spans são pulados por um
+pequeno plugin ignorer (`stryker-plugins.mjs`). Mutantes que não mudam comportamento são marcados no código com o
+motivo. A execução falha abaixo de 95% ([ADR 0011](docs/adr/0011-mutation-and-property-testing.md)).
 
 O teste de carga do k6 (`make load`) coloca 50 usuários virtuais disputando um SKU, cada um com duplo clique.
 `make load-peak` roda o pico de checkout descrito em [Proteção de pico no checkout](#proteção-de-pico-no-checkout).
 
 A [CI](.github/workflows/ci.yml) roda `npm run check` e `npm test` em todo push e pull request para `main` e
 `develop`, contra service containers de Postgres, Redis e ElasticMQ mais o ERP mock; o relatório de cobertura fica
-como artefato do workflow e os totais aparecem no resumo do job. O `make load` roda sob demanda: dispare o workflow
-manualmente (`workflow_dispatch`) com `load` marcado, e ele também confere no Postgres que nenhuma unidade foi
-vendida a mais.
+como artefato do workflow e os totais aparecem no resumo do job. O `make load` e o `make mutation` rodam sob demanda:
+dispare o workflow manualmente (`workflow_dispatch`) com `load` (que também confere no Postgres que nenhuma unidade
+foi vendida a mais) ou `mutation` marcado; o relatório de mutação fica como artefato e o score aparece no resumo do job.
 
 ## Verificação
 

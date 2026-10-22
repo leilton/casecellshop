@@ -126,7 +126,11 @@ describe('invoicing against the real database', () => {
 
     expect(await invoicing.handleDeadLetter(orderId)).toMatchObject({ action: 'ack' });
 
-    expect(await fx.order(orderId)).toMatchObject({ status: 'FAILED', attempts: 5 });
+    expect(await fx.order(orderId)).toMatchObject({
+      status: 'FAILED',
+      attempts: 5,
+      last_error: 'invoicing attempts exhausted',
+    });
     expect(await fx.inventory(sku)).toEqual({ available: 10, reserved: 0 });
     // Handling the same dead letter twice must not release the stock twice.
     await invoicing.handleDeadLetter(orderId);
@@ -143,6 +147,7 @@ describe('invoicing against the real database', () => {
     await invoicing.handleDeadLetter(orderId);
 
     expect((await fx.order(orderId))?.status).toBe('INVOICED');
+    expect((await services.orders.getStatus(orderId)).history.at(-1)?.detail).toMatchObject({ source: 'dlq-lookup' });
     expect(await fx.inventory(sku)).toEqual({ available: 8, reserved: 0 });
     expect(erp.invoicesFor(orderId)).toHaveLength(1);
   });
@@ -169,7 +174,7 @@ describe('invoicing against the real database', () => {
     const result = await expiredSetup.invoicing.reconcile();
 
     expect(result.cancelled).toBeGreaterThanOrEqual(1);
-    expect((await fx.order(expired))?.status).toBe('CANCELLED');
+    expect(await fx.order(expired)).toMatchObject({ status: 'CANCELLED', last_error: 'reservation expired' });
     expect((await fx.order(fresh))?.status).toBe('RESERVED');
     expect(await fx.inventory(sku)).toEqual({ available: 9, reserved: 1 });
   });
@@ -186,6 +191,92 @@ describe('invoicing against the real database', () => {
 
     expect(result.adopted).toBeGreaterThanOrEqual(1);
     expect((await fx.order(orderId))?.status).toBe('INVOICED');
+    expect((await services.orders.getStatus(orderId)).history.at(-1)?.detail).toMatchObject({
+      source: 'reconciliation',
+    });
     expect(erp.invoicesFor(orderId)).toHaveLength(1);
+  });
+
+  it('sends the ERP only sku and quantity, and records each transition with its detail', async () => {
+    const erp = new FakeErp().failNext('createInvoice', 'unavailable');
+    const { services, invoicing } = setup(erp);
+    const sku = await fx.sku({ available: 10 });
+    const orderId = await placeOrder(services, sku, 2);
+
+    await invoicing.processOrder(orderId);
+    await db.query('UPDATE orders SET invoicing_lease_until = NULL WHERE id = $1', [orderId]);
+    await invoicing.processOrder(orderId);
+
+    expect(erp.invoiceItems.get(orderId)).toEqual([{ sku, quantity: 2 }]);
+    const history = (await services.orders.getStatus(orderId)).history;
+    // A retry stays in INVOICING: one RESERVED → INVOICING event, not one per attempt.
+    expect(history.map((h) => h.to)).toEqual(['RESERVED', 'INVOICING', 'INVOICED']);
+    expect(history[1]?.detail).toEqual({ attempt: 1 });
+    expect(history[2]?.detail).toEqual({ invoiceId: erp.invoicesFor(orderId)[0]?.invoiceId, source: 'create' });
+  });
+
+  it('records why stock was released on failure', async () => {
+    const { services, invoicing } = setup(new FakeErp().failNext('createInvoice', 'client'));
+    const sku = await fx.sku({ available: 10 });
+    const orderId = await placeOrder(services, sku);
+
+    await invoicing.processOrder(orderId);
+
+    const failed = (await services.orders.getStatus(orderId)).history.at(-1);
+    expect(failed).toMatchObject({ from: 'INVOICING', to: 'FAILED', detail: { released: true } });
+    expect(failed?.detail).toEqual({ reason: expect.any(String), released: true });
+  });
+
+  describe('repository state guards', () => {
+    const repo = () => createInvoicingRepository(db);
+    const UNKNOWN = '2f1e0d9c-8b7a-4695-8473-625140302f1e';
+
+    it('reports unknown orders as not_found everywhere', async () => {
+      expect(await repo().startAttempt(UNKNOWN, 15)).toEqual({ kind: 'not_found' });
+      expect(await repo().markInvoiced(UNKNOWN, 'inv-x', { source: 'test' })).toEqual({ kind: 'not_found' });
+      expect(await repo().releaseReservation(UNKNOWN, 'FAILED', 'test', ['INVOICING'])).toEqual({
+        kind: 'not_found',
+      });
+    });
+
+    it('adopting an invoice twice sells the stock once', async () => {
+      const { services } = setup();
+      const sku = await fx.sku({ available: 10 });
+      const orderId = await placeOrder(services, sku, 2);
+
+      expect((await repo().markInvoiced(orderId, 'inv-1', { source: 'test' })).kind).toBe('done');
+      expect((await repo().markInvoiced(orderId, 'inv-1', { source: 'test' })).kind).toBe('already');
+
+      expect(await fx.inventory(sku)).toEqual({ available: 8, reserved: 0 });
+      expect(await fx.count('order_events', orderId)).toBe(2);
+    });
+
+    it('an invoice found for an already released order takes the units from available (the ERP wins)', async () => {
+      const { services } = setup();
+      const sku = await fx.sku({ available: 10 });
+      const orderId = await placeOrder(services, sku, 3);
+      await services.orders.cancel(orderId);
+      expect(await fx.inventory(sku)).toEqual({ available: 10, reserved: 0 });
+
+      expect((await repo().markInvoiced(orderId, 'inv-late', { source: 'reconciliation' })).kind).toBe('done');
+
+      expect(await fx.inventory(sku)).toEqual({ available: 7, reserved: 0 });
+      expect((await fx.order(orderId))?.status).toBe('INVOICED');
+    });
+
+    it('releasing an order that is no longer in an allowed status changes nothing', async () => {
+      const { services } = setup();
+      const sku = await fx.sku({ available: 10 });
+      const orderId = await placeOrder(services, sku, 2);
+      await repo().releaseReservation(orderId, 'FAILED', 'first', ['RESERVED']);
+      const events = await fx.count('order_events', orderId);
+
+      const again = await repo().releaseReservation(orderId, 'CANCELLED', 'second', ['RESERVED', 'INVOICING']);
+
+      expect(again.kind).toBe('already');
+      expect(await fx.order(orderId)).toMatchObject({ status: 'FAILED', last_error: 'first' });
+      expect(await fx.count('order_events', orderId)).toBe(events);
+      expect(await fx.inventory(sku)).toEqual({ available: 10, reserved: 0 });
+    });
   });
 });

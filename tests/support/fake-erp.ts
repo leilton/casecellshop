@@ -17,6 +17,8 @@ type Failure = ErpErrorKind | 'timeout-after-create';
 export class FakeErp implements ErpClient {
   readonly invoices: ErpInvoice[] = [];
   readonly calls = { listProducts: 0, createInvoice: 0, findInvoices: 0 };
+  /** Items sent with each createInvoice call, by orderId (last call wins). */
+  readonly invoiceItems = new Map<string, InvoiceItem[]>();
   private products: ErpProduct[];
   private readonly failures: Record<keyof FakeErp['calls'], Failure[]> = {
     listProducts: [],
@@ -67,12 +69,12 @@ export class FakeErp implements ErpClient {
 
   async createInvoice(orderId: string, items: InvoiceItem[]): Promise<ErpInvoice> {
     this.calls.createInvoice += 1;
+    this.invoiceItems.set(orderId, items);
     await this.wait();
     const failure = this.failures.createInvoice.shift();
     const invoice = { invoiceId: randomUUID(), orderId, createdAt: new Date().toISOString() };
     if (failure === 'timeout-after-create') {
       this.invoices.push(invoice);
-      void items;
       throw new ErpError('timeout', 'create_invoice');
     }
     if (failure) throw new ErpError(failure, 'create_invoice', failure === 'client' ? 400 : 503);

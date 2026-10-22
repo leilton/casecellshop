@@ -63,6 +63,7 @@ export const checkoutRoutes: FastifyPluginAsync<CheckoutRouteOptions> = async (
         service.place({
           idempotencyKey: key.data,
           items: body.data.items,
+          // Stryker disable next-line LogicalOperator,OptionalChaining: the onRequest hook always creates the context
           correlationId: currentContext()?.correlationId ?? req.id,
         }),
       )

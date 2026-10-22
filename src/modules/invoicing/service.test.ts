@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { FakeErp } from '../../../tests/support/fake-erp';
 import { silentLogger } from '../../../tests/support/fakes';
+import { histogramCount } from '../../../tests/support/metrics';
+import { orderProcessingDuration } from '../../shared/metrics';
 import type { OrderStatus } from '../checkout/schemas';
 import type { FinishResult, InvoicingOrder, InvoicingRepository, StartResult } from './repository';
 import { TERMINAL_STATUSES } from './repository';
@@ -93,7 +95,7 @@ class MemoryInvoicingRepo implements InvoicingRepository {
   }
 }
 
-function setup(erp = new FakeErp()) {
+function setup(erp = new FakeErp(), now?: () => number) {
   const repo = new MemoryInvoicingRepo();
   const service = createInvoicingService({
     repo,
@@ -103,8 +105,15 @@ function setup(erp = new FakeErp()) {
     stuckInvoicingAfterS: 120,
     leaseS: 15,
     random: () => 1,
+    ...(now ? { now } : {}),
   });
   return { repo, erp, service };
+}
+
+async function durationSum(finalStatus: string): Promise<number> {
+  const { values } = await orderProcessingDuration.get();
+  const sum = values.find((v) => v.metricName?.endsWith('_sum') && v.labels.final_status === finalStatus);
+  return sum?.value ?? 0;
 }
 
 describe('computeBackoffS', () => {
@@ -219,7 +228,116 @@ describe('invoicing service — processOrder', () => {
   });
 });
 
+describe('invoicing service — non-ERP failures', () => {
+  it('a bug in the ERP client propagates instead of failing the order and releasing stock', async () => {
+    const erp = new FakeErp();
+    erp.createInvoice = async () => {
+      throw new TypeError('client bug');
+    };
+    const { repo, service } = setup(erp);
+    repo.add();
+
+    await expect(service.processOrder(ORDER)).rejects.toThrow('client bug');
+    expect(repo.get()).toMatchObject({ status: 'INVOICING' });
+    expect(repo.get().released).toBeUndefined();
+  });
+
+  it('a bug during the DLQ lookup propagates instead of being retried as an ERP outage', async () => {
+    const erp = new FakeErp();
+    erp.findInvoices = async () => {
+      throw new TypeError('client bug');
+    };
+    const { repo, service } = setup(erp);
+    repo.add('INVOICING');
+
+    await expect(service.handleDeadLetter(ORDER)).rejects.toThrow('client bug');
+    expect(repo.get().status).toBe('INVOICING');
+  });
+});
+
+describe('invoicing service — final-status duration metric', () => {
+  const CREATED = 1_000_000;
+  const clock = () => CREATED + 5_000;
+
+  it('observes the time from order creation to INVOICED, in seconds, once', async () => {
+    const { repo, service } = setup(new FakeErp(), clock);
+    repo.add('RESERVED', { createdAt: new Date(CREATED) });
+    const before = {
+      n: await histogramCount(orderProcessingDuration, { final_status: 'INVOICED' }),
+      sum: await durationSum('INVOICED'),
+    };
+
+    await service.processOrder(ORDER);
+
+    expect(await histogramCount(orderProcessingDuration, { final_status: 'INVOICED' })).toBe(before.n + 1);
+    expect(await durationSum('INVOICED')).toBeCloseTo(before.sum + 5);
+  });
+
+  it('does not observe again when the order was already settled', async () => {
+    const erp = new FakeErp();
+    erp.invoices.push({ invoiceId: 'inv-1', orderId: ORDER, createdAt: new Date().toISOString() });
+    const { repo, service } = setup(erp, clock);
+    repo.add('INVOICED', { createdAt: new Date(CREATED), invoiceId: 'inv-1' });
+    const before = await histogramCount(orderProcessingDuration, { final_status: 'INVOICED' });
+
+    await service.handleDeadLetter(ORDER);
+
+    expect(await histogramCount(orderProcessingDuration, { final_status: 'INVOICED' })).toBe(before);
+  });
+
+  it('observes FAILED once for an ERP rejection, and not when the release found nothing to do', async () => {
+    const { repo, service } = setup(new FakeErp().failAlways('createInvoice', 'client'), clock);
+    repo.add('RESERVED', { createdAt: new Date(CREATED) });
+    const before = await histogramCount(orderProcessingDuration, { final_status: 'FAILED' });
+
+    await service.processOrder(ORDER);
+    expect(await histogramCount(orderProcessingDuration, { final_status: 'FAILED' })).toBe(before + 1);
+
+    repo.add('RESERVED', { createdAt: new Date(CREATED) });
+    // A concurrent settlement got there first: the order is already final, so it must not be observed twice.
+    repo.releaseReservation = async () => ({ kind: 'already', order: { ...repo.get(), status: 'FAILED' } });
+    expect(await service.processOrder(ORDER)).toEqual({ action: 'ack', reason: 'ERP rejected the invoice' });
+    expect(await histogramCount(orderProcessingDuration, { final_status: 'FAILED' })).toBe(before + 1);
+  });
+
+  it('observes a dead-letter failure once; a DLQ message for an already cancelled order observes nothing', async () => {
+    const { repo, service } = setup(new FakeErp(), clock);
+    repo.add('INVOICING', { createdAt: new Date(CREATED) });
+    const before = await histogramCount(orderProcessingDuration, { final_status: 'FAILED' });
+
+    expect(await service.handleDeadLetter(ORDER)).toEqual({
+      action: 'ack',
+      reason: 'order failed, reservation released',
+    });
+    expect(await histogramCount(orderProcessingDuration, { final_status: 'FAILED' })).toBe(before + 1);
+
+    repo.add('CANCELLED', { createdAt: new Date(CREATED) });
+    const cancelledBefore = await histogramCount(orderProcessingDuration, { final_status: 'CANCELLED' });
+    await service.handleDeadLetter(ORDER);
+    expect(await histogramCount(orderProcessingDuration, { final_status: 'CANCELLED' })).toBe(cancelledBefore);
+    expect(await histogramCount(orderProcessingDuration, { final_status: 'FAILED' })).toBe(before + 1);
+    expect(repo.get().status).toBe('CANCELLED');
+  });
+
+  it('reconciliation counts only the reservations it actually cancelled', async () => {
+    const { repo, service } = setup(new FakeErp(), clock);
+    repo.add('RESERVED', { expired: true, createdAt: new Date(CREATED) });
+    repo.releaseReservation = async () => ({ kind: 'already', order: repo.get() });
+
+    expect(await service.reconcile()).toEqual({ cancelled: 0, adopted: 0 });
+  });
+});
+
 describe('invoicing service — dead letters', () => {
+  it('fails an order that never got an attempt (still RESERVED) and releases it', async () => {
+    const { repo, service } = setup();
+    repo.add('RESERVED');
+
+    await service.handleDeadLetter(ORDER);
+
+    expect(repo.get()).toMatchObject({ status: 'FAILED', released: true, lastError: 'invoicing attempts exhausted' });
+  });
+
   it('fails the order and releases the reservation when the ERP has no invoice', async () => {
     const { repo, service } = setup();
     repo.add('INVOICING', { attempts: 5 });
@@ -243,7 +361,11 @@ describe('invoicing service — dead letters', () => {
     const { repo, service } = setup(new FakeErp().failNext('findInvoices', 'unavailable'));
     repo.add('INVOICING');
 
-    expect(await service.handleDeadLetter(ORDER)).toMatchObject({ action: 'retry', delayS: 60 });
+    expect(await service.handleDeadLetter(ORDER)).toEqual({
+      action: 'retry',
+      delayS: 60,
+      reason: 'ERP unavailable for DLQ lookup',
+    });
     expect(repo.get().status).toBe('INVOICING');
   });
 });

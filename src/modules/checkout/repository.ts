@@ -28,6 +28,7 @@ export interface CheckoutRepository {
 
 class OutOfStock extends Error {
   constructor(readonly items: StockShortage[]) {
+    // Stryker disable next-line StringLiteral: control-flow signal caught below, the message is never read
     super('out of stock');
   }
 }
@@ -60,6 +61,7 @@ export function createCheckoutRepository(db: Db): CheckoutRepository {
               [input.idempotencyKey],
             );
             const existing = rows[0];
+            // Stryker disable next-line all: defensive; ON CONFLICT means the row exists and our lock waited for it
             if (!existing) throw new Error('idempotency conflict without a visible order');
             return {
               kind: 'existing',

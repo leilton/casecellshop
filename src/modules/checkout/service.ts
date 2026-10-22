@@ -31,11 +31,9 @@ export interface CheckoutService {
 
 /** Order-insensitive hash so that `[A, B]` and `[B, A]` count as the same request for idempotency. */
 export function hashCheckoutRequest(items: CheckoutItem[]): string {
-  const canonical = [...items]
-    .sort((a, b) => a.sku.localeCompare(b.sku))
-    .map((i) => `${i.sku}:${i.quantity}`)
-    .join('|');
-  return createHash('sha256').update(canonical).digest('hex');
+  const parts = [...items].sort((a, b) => a.sku.localeCompare(b.sku)).map((i) => `${i.sku}:${i.quantity}`);
+  // Stryker disable next-line StringLiteral: skus cannot contain ':' and quantities are one digit, so even no separator cannot collide
+  return createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
 /** A message a shopper can read: what is short, what is left, and that nothing was taken from them. */
@@ -68,6 +66,7 @@ export function createCheckoutService(deps: CheckoutServiceDeps): CheckoutServic
         throw new AppError('UNKNOWN_SKU', 422, `Unknown sku: ${unknown.join(', ')}`, { skus: unknown });
       }
 
+      // Stryker disable next-line OptionalChaining: every sku was priced just above (unknown ones throw)
       const items = cmd.items.map((i) => ({ ...i, priceCents: priced.get(i.sku)?.priceCents ?? 0 }));
       const totalCents = items.reduce((sum, i) => sum + i.priceCents * i.quantity, 0);
 
