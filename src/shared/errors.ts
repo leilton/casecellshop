@@ -4,7 +4,6 @@ export type ErrorCode =
   | 'MISSING_IDEMPOTENCY_KEY'
   | 'INVALID_IDEMPOTENCY_KEY'
   | 'ROUTE_NOT_FOUND'
-  | 'METHOD_NOT_ALLOWED'
   | 'PRODUCT_NOT_FOUND'
   | 'ORDER_NOT_FOUND'
   | 'OUT_OF_STOCK'
@@ -64,6 +63,9 @@ export function isConnectionError(err: unknown): boolean {
   if (typeof code === 'string' && CONNECTION_ERROR_CODES.has(code)) return true;
   const message = (err as { message?: unknown }).message;
   return (
-    typeof message === 'string' && /Connection terminated|connect ECONNREFUSED|Connection is closed/i.test(message)
+    typeof message === 'string' &&
+    /Connection terminated|connect ECONNREFUSED|Connection is closed|Stream isn't writeable|enableOfflineQueue/i.test(
+      message,
+    )
   );
 }

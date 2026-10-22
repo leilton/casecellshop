@@ -17,7 +17,6 @@ const envSchema = z.object({
   ERP_BASE_URL: z.string().url(),
   ERP_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
 
-  CACHE_TTL_CATALOG_S: z.coerce.number().int().positive().default(300),
   CACHE_TTL_PRICE_S: z.coerce.number().int().positive().default(60),
   CACHE_TTL_STOCK_S: z.coerce.number().int().positive().default(5),
   CACHE_STALE_IF_ERROR_S: z.coerce.number().int().nonnegative().default(120),
@@ -34,6 +33,7 @@ const envSchema = z.object({
   OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().max(10).default(10),
   RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   INVOICING_STUCK_AFTER_S: z.coerce.number().int().positive().default(120),
+  INVOICING_LEASE_S: z.coerce.number().int().positive().default(15),
 });
 
 export type Config = z.infer<typeof envSchema>;

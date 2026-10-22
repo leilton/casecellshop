@@ -11,6 +11,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Shared foundation: Zod-validated config, pino logger with correlation context, metrics registry (README
   contract), span helpers with trace-context propagation, Postgres transaction helper, Redis/SQS clients and
   an ERP HTTP client with mandatory timeout, error classification and ERP metrics.
+- `GET /products`: cache-aside in Redis with fresh/stale windows, single-flight (in-process + Redis lock),
+  stale-if-error and `x-cache`; ERP catalog sync by `version` that updates the read model and evicts the cache.
+- `POST /checkout`: `Idempotency-Key`, atomic conditional reservation, order + event + outbox in one
+  transaction, server-side prices, `202` with `Location`.
+- `GET /orders/{orderId}/status` with the full status history.
+- Error contract `{ error: { code, message, details? } }` with stable codes (400/404/409/415/422/500/503) and
+  `docs/openapi.yaml` documenting every route and status.
+- Worker: outbox relay (`SKIP LOCKED`), SQS consumer with backoff + full jitter, lookup-before-retry, an
+  invoicing lease against concurrent duplicate deliveries, DLQ handler (FAILED + stock released) and a
+  reconciliation job (expired reservations, stuck invoicing).
+- Grafana dashboard provisioned from `infra/grafana/provisioning/dashboards`; alerts for failed invoicing,
+  expiring reservations and slow invoicing.
+- 153 tests (unit + integration against Postgres/Redis/SQS) with an HTTP status matrix, an OpenAPI contract
+  check and an 80% coverage gate; integration tests use an isolated `shop_test` database.
+
+### Changed
+
+- Schema: `orders.invoicing_lease_until` (run `make reset`).
+- `CACHE_TTL_CATALOG_S` removed: names and prices arrive together from the ERP and share the price TTL.
+- `npm run build` uses `tsconfig.build.json`; `tsconfig.json` type-checks source and tests.
+
+### Fixed
+
+- Intermittent 2 s `503` on `GET /products`: exporting traces to a missing collector starved the libuv
+  threadpool with slow DNS lookups. Traces are exported only when `OTEL_TRACES_EXPORTER=otlp` (`make obs`).
+- `text/plain` bodies now get `415` instead of being parsed as a string.
+- A Redis client that is still connecting is treated as unavailable (cache bypass) instead of a `500`.
+- k6 load test treats `409` as an expected response.
 
 ## [0.1.0] - 2026-10-22
 
