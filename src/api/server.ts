@@ -72,7 +72,22 @@ async function main() {
     return { postgres, redis: redisStatus, sqs: queue, erp: erpStatus };
   };
 
-  const app = await buildApp({ logger, catalog, checkout, orders, health });
+  const app = await buildApp({
+    logger,
+    catalog,
+    checkout,
+    orders,
+    health,
+    trustProxy: cfg.TRUST_PROXY,
+    rateLimitRedis: redis,
+    rateLimitNamespace: 'rl:',
+    checkoutLimits: {
+      max: cfg.CHECKOUT_MAX_CONCURRENCY,
+      maxQueue: cfg.CHECKOUT_MAX_QUEUE,
+      queueTimeoutMs: cfg.CHECKOUT_QUEUE_TIMEOUT_MS,
+      rateLimit: { max: cfg.CHECKOUT_RATE_LIMIT_MAX, windowS: cfg.CHECKOUT_RATE_LIMIT_WINDOW_S },
+    },
+  });
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'shutting down');

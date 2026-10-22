@@ -24,6 +24,7 @@ ERP errors + 20% timeouts, **0** duplicate invoices.
 - [Quick start](#quick-start)
 - [API](#api)
 - [How it works](#how-it-works)
+- [Peak protection at checkout](#peak-protection-at-checkout)
 - [Decisions and trade-offs](#decisions-and-trade-offs)
 - [Observability: logs, metrics, traces, SLOs, alerts](#observability)
 - [Tests](#tests)
@@ -40,7 +41,7 @@ container).
 ```bash
 make up                         # api, worker, erp-mock, postgres, redis, sqs
 curl localhost:3000/health      # postgres, redis, sqs, erp = ok
-make test                       # 157 tests + coverage (runs inside the api container)
+make test                       # 174 tests + coverage (runs inside the api container)
 make obs                        # + otel-collector, jaeger, prometheus, grafana (exports traces)
 ```
 
@@ -78,7 +79,7 @@ Swagger UI at http://localhost:3000/docs (with "Try it out", no download needed)
 | Route                          | Success                         | Errors                                   |
 | ------------------------------ | ------------------------------- | ---------------------------------------- |
 | `GET /products[?sku=]`         | `200` (may be stale, `x-cache`) | `400`, `404`, `500`, `503`               |
-| `POST /checkout`               | `202 { orderId, status, statusUrl }` + `Location` | `400`, `409`, `415`, `422`, `500`, `503` |
+| `POST /checkout`               | `202 { orderId, status, statusUrl }` + `Location` | `400`, `409`, `415`, `422`, `429`, `500`, `503` |
 | `GET /orders/{orderId}/status` | `200` with history              | `400`, `404`, `500`, `503`               |
 
 Every error has the same shape and a stable `code`:
@@ -94,8 +95,9 @@ Every error has the same shape and a stable `code`:
 | 409    | `OUT_OF_STOCK` (nothing reserved)                                           |
 | 415    | `UNSUPPORTED_MEDIA_TYPE`                                                     |
 | 422    | `IDEMPOTENCY_KEY_REUSED` (same key, other items), `UNKNOWN_SKU`              |
+| 429    | `RATE_LIMITED` (per-client checkout budget; `Retry-After`, nothing reserved)  |
 | 500    | `INTERNAL_ERROR` (no internals leaked; the `x-correlation-id` finds the logs) |
-| 503    | `CATALOG_UNAVAILABLE` (ERP down, nothing cached), `DEPENDENCY_UNAVAILABLE`  |
+| 503    | `CATALOG_UNAVAILABLE` (ERP down, nothing cached), `DEPENDENCY_UNAVAILABLE`, `OVERLOADED` (checkout at capacity; `Retry-After`, nothing reserved) |
 
 Every response carries `x-correlation-id` (echoed if sent, generated otherwise).
 
@@ -150,6 +152,47 @@ stateDiagram-v2
 
 More detail: [`docs/architecture.md`](docs/architecture.md).
 
+## Peak protection at checkout
+
+Two cheap gates run before any stock is touched ([ADR 0009](docs/adr/0009-checkout-load-shedding.md)):
+
+1. **Rate limit per client IP.** `CHECKOUT_RATE_LIMIT_MAX` checkouts per `CHECKOUT_RATE_LIMIT_WINDOW_S` (default
+   20 per 10 s), counted in Redis so every instance shares the budget. The check runs before the body is parsed.
+   Over budget → `429 RATE_LIMITED`. If Redis is down the limit is skipped (fail open). `X-Forwarded-For` counts
+   only with `TRUST_PROXY=true` (on in compose so k6 can simulate many clients; in production only behind a
+   proxy that overwrites the header).
+2. **Concurrency limit per instance with a short wait queue.** At most `CHECKOUT_MAX_CONCURRENCY` (16) checkouts
+   run at once. Up to `CHECKOUT_MAX_QUEUE` (100) wait, first in first out, for at most
+   `CHECKOUT_QUEUE_TIMEOUT_MS` (1 s). Beyond that → `503 OVERLOADED`.
+
+Both answers carry `Retry-After`. The client should wait that long and retry with the **same `Idempotency-Key`**:
+nothing was reserved, and the retry returns the same order if an earlier attempt got through.
+
+Measured with `make load-peak` (`tests/load/peak.js`): a crowd of distinct clients ramping up to the offered rate
+over 10 s and holding it for 20 s, plus one abusive client at 20 req/s. One API instance on a laptop; each row is
+one run after `make reset && make up` (the "off" rows raise every limit). "Admitted" means answered `202`/`409`.
+"Not sent" is iterations k6 dropped because all 2,000 of its virtual users were stuck waiting.
+
+| Offered crowd | Protection | Served | Admitted | p95 admitted | `429` | `503` | p95 of a `429`/`503` | Not sent |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1,500 req/s | off | 1,203/s | 1,203/s | 28 ms | 0% | 0% | — | 0 |
+| 1,500 req/s | on | 1,203/s | 1,182/s | 82 ms | 1.3% (the abuser) | 0.5% | 8 ms | 0 |
+| 2,500 req/s | off | 1,346/s | 1,346/s | 1.37 s | 0% | 0% | — | 22,480 |
+| 2,500 req/s | on | 1,988/s | 1,037/s | 135 ms | 0.8% | 47% | 9 ms | 0 |
+| 4,000 req/s | off | 1,404/s | 1,404/s | 1.40 s | 0% | 0% | — | 61,686 |
+| 4,000 req/s | on | 3,165/s | 668/s | 248 ms | 0.5% | 78% | 17 ms | 80 |
+
+In every run: 0 unexpected statuses, every rejection carried `Retry-After`, and the abuser got exactly its budget
+(60 of 600 accepted). No unit was oversold: 50 units, 50 orders.
+
+How to read it. The single API process saturates at about 1,350 checkouts/s (~110% CPU). Past that point, without
+protection, latency jumps to over a second and clients pile up. With protection, admitted checkouts stay
+under 250 ms and the excess gets a 10–20 ms answer with a retry hint.
+
+The protection has a cost. Rejections still use the CPU of the process they protect, so useful throughput under
+overload falls by 25–50%. Below capacity, the cap adds some queueing. Real capacity comes from more instances
+(capacity is per instance). The next step is rejecting at the edge (load balancer or CDN rate limit).
+
 ## Decisions and trade-offs
 
 | Decision | Why | Cost / trade-off |
@@ -161,6 +204,7 @@ More detail: [`docs/architecture.md`](docs/architecture.md).
 | Idempotency in Postgres (UNIQUE key + request hash) ([ADR 0005](docs/adr/0005-idempotency-strategy.md)) | Source of truth, survives Redis loss, serializes double clicks | A `409` stores nothing, so the same key may succeed later if stock comes back |
 | Lookup-before-retry + invoicing lease ([ADR 0007](docs/adr/0007-invoicing-lease-and-dlq-settlement.md)) | The ERP invoice endpoint is not idempotent | One extra ERP read per retry; a duplicate delivery waits up to the lease (15 s) |
 | Cache-aside with fresh/stale windows, single-flight, version sync ([ADR 0006](docs/adr/0006-storefront-cache.md)) | Latency and ERP load drop by orders of magnitude without a stampede | Prices can be up to one sync interval old (10 s); stale copies are flagged |
+| Rate limit per IP + per-instance concurrency cap with a short queue ([ADR 0009](docs/adr/0009-checkout-load-shedding.md)) | Bounded latency and a fast, retryable `429`/`503` instead of every request timing out together | Under overload useful throughput falls (rejections still cost CPU); users behind one NAT share a budget |
 | Displayed stock is advisory | The reservation is the real check; caching stock for 5 s is safe | A product may show "in stock" and then get `409` |
 | Traces exported only when a collector runs ([ADR 0008](docs/adr/0008-export-traces-only-with-a-collector.md)) | A missing collector starved DNS lookups and caused 2 s timeouts | `make up` alone has no trace UI (trace ids still appear in logs) |
 | ElasticMQ for SQS, CommonJS for OTel ([ADR 0002](docs/adr/0002-elasticmq-as-local-sqs.md), [0003](docs/adr/0003-commonjs-for-otel.md)) | Same AWS SDK code runs against AWS; auto-instrumentation needs CJS | — |
@@ -181,7 +225,8 @@ the worker's logs and the `x-correlation-id` header sent to the ERP. Payloads ar
 | --- | --- | --- |
 | `http_request_duration_seconds` | histogram | `route`, `method`, `status` |
 | `cache_requests_total` | counter | `cache` = products/stock, `result` = hit/miss/stale |
-| `checkout_requests_total` | counter | `outcome` = accepted/out_of_stock/duplicate/invalid |
+| `checkout_requests_total` | counter | `outcome` = accepted/out_of_stock/duplicate/invalid/rate_limited/shed |
+| `checkout_inflight` / `checkout_queue_waiting` | gauge | — (per instance) |
 | `stock_reservation_conflicts_total` | counter | `sku` |
 | `inventory_available` | gauge | `sku` |
 | `checkout_queue_depth` | gauge | `queue` = main/dlq |
@@ -206,7 +251,7 @@ checkout is **one trace** across both services (31 spans in the local run: `POST
 **Alerts** ([`infra/prometheus/alerts.yml`](infra/prometheus/alerts.yml), each linked to a runbook in
 [`docs/runbooks/`](docs/runbooks/)): `StorefrontHighLatency`, `CacheHitRatioLow`, `CacheServingStale`,
 `CheckoutQueueBacklog`, `MessagesInDLQ`, `OrdersFailingInvoicing`, `ReservationsExpiring`, `InvoicingTooSlow`,
-`ErpHighErrorRate`, `PossibleOverselling`.
+`ErpHighErrorRate`, `PossibleOverselling`, `CheckoutLoadShedding`.
 
 **Dashboard** — provisioned in Grafana (`make obs`, http://localhost:3001): SLI stats, storefront latency and
 hit ratio, cache results, checkouts by outcome, conflicts and stock per SKU, queue depth, final statuses, ERP
@@ -226,11 +271,12 @@ errors and latency.
 | `correlationId` in logs | Log facet + trace correlation (`dd.trace_id` from OTel) |
 
 Runbooks: [slow storefront](docs/runbooks/slow-storefront.md), [ERP degraded](docs/runbooks/erp-degraded.md),
-[DLQ / failed orders](docs/runbooks/dlq-growing.md), [suspected overselling](docs/runbooks/suspected-oversell.md).
+[DLQ / failed orders](docs/runbooks/dlq-growing.md), [suspected overselling](docs/runbooks/suspected-oversell.md),
+[checkout load shedding](docs/runbooks/checkout-shedding.md).
 
 ## Tests
 
-`make test` runs 157 tests in the api container with a coverage gate (80% lines; currently ~92%). Unit tests
+`make test` runs 174 tests in the api container with a coverage gate (80% lines; currently ~92%). Unit tests
 live next to the code (`src/**/*.test.ts`) and use in-memory fakes; integration tests (`tests/integration/`)
 run against the compose Postgres, Redis and SQS, in an isolated `shop_test` database rebuilt from
 `infra/postgres/init.sql` on every run.
@@ -241,11 +287,13 @@ run against the compose Postgres, Redis and SQS, in an isolated `shop_test` data
 | Idempotency | simultaneous double click → one order, one reservation, one outbox row; same key + other items → `422`; item order does not matter; a `409` key can be retried |
 | Cache | single-flight (50 concurrent misses → 1 ERP call; two instances sharing Redis → 1 call), fresh/stale TTLs, stale-if-error, Redis down → bypass, lock released on failure, version sync |
 | Worker | timeout that did create the invoice → adopted, never duplicated; concurrent duplicate deliveries → one invoice (lease); 4xx → `FAILED` + stock back; DLQ settles once; reconciliation; poison messages; backoff bounds; outbox `SKIP LOCKED` with two relays; end to end over a real queue |
-| HTTP | status matrix per route: 200/202, 400 (13 invalid bodies, key and param cases), 404, 409, 415, 422, 500 (no leak), 503; correlation id; metrics labelled by route pattern |
+| HTTP | status matrix per route: 200/202, 400 (13 invalid bodies, key and param cases), 404, 409, 415, 422, 429, 500 (no leak), 503; correlation id; metrics labelled by route pattern |
+| Peak protection | `429` past the per-IP budget with `Retry-After`, nothing reserved; budget shared by two instances through Redis; `X-Forwarded-For` ignored unless trusted; Redis down → fail open; a queued request runs when a slot frees; queue full or wait timeout → `503 OVERLOADED` with `Retry-After`, and a retry with the same key gets the order; invalid requests never take a slot; limiter FIFO and slot release on error |
 | Contract | real responses validated against `docs/openapi.yaml` schemas with Ajv |
 | ERP client | against the real ERP mock, failures forced through its admin API: 5xx, timeout, 4xx, non-idempotent invoice |
 
-The k6 test (`make load`) races 50 virtual users for one SKU, each with a double click.
+The k6 test (`make load`) races 50 virtual users for one SKU, each with a double click. `make load-peak` runs
+the checkout spike described in [Peak protection at checkout](#peak-protection-at-checkout).
 
 [CI](.github/workflows/ci.yml) runs `npm run check` and `npm test` on every push and pull request to `main` and
 `develop`, against Postgres, Redis and ElasticMQ service containers plus the ERP mock; the coverage report is a
@@ -259,6 +307,7 @@ Run on the local stack after `make reset && make up`:
 | Check | Result |
 | --- | --- |
 | `make load` (200 checkouts, 10 units, double clicks) | 10 accepted, 190 `409`, 100% same `orderId` on double click, 0% unexpected failures; all 10 `INVOICED` with one invoice each, `available = 0`, `reserved = 0` |
+| `make load-peak` (`PEAK_RATE` 1,500 / 2,500 / 4,000) | see [Peak protection at checkout](#peak-protection-at-checkout); 0 unexpected statuses, 0 oversold |
 | `make chaos` + 12 orders | `GET /products` 200 throughout (cache); 11 `INVOICED` (≤ 3 attempts), 1 `FAILED` after 5 attempts via DLQ with stock released; 0 duplicate invoices |
 | ERP price change | visible in `GET /products` after ~7 s (sync), not after the 60 s TTL; read model updated for checkout |
 | `GET /products` warm | p95 4.8 ms, hit ratio 99% (ERP cold call: ~400 ms) |

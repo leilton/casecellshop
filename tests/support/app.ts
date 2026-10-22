@@ -60,6 +60,9 @@ export async function createTestApp(
     logger: silentLogger,
     ...services,
     health: async () => ({ postgres: 'ok', redis: 'ok', sqs: 'ok', erp: 'ok' }),
+    // Real Redis counters with a private namespace; the default limits are high enough not to interfere.
+    rateLimitRedis: redis,
+    rateLimitNamespace: `${uniqueId('rl')}:`,
     ...overrides,
   });
   await app.ready();

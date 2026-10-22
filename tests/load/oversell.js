@@ -22,7 +22,9 @@ export const options = {
 
 export default function () {
   const key = `k6-${__VU}-${__ITER}`;
-  const params = { headers: { 'content-type': 'application/json', 'idempotency-key': key } };
+  // One simulated client per VU (8 requests each, inside the per-client rate limit; compose trusts the header).
+  const headers = { 'content-type': 'application/json', 'idempotency-key': key, 'x-forwarded-for': `10.0.0.${__VU}` };
+  const params = { headers };
   const body = JSON.stringify({ items: [{ sku: SKU, quantity: 1 }] });
 
   // double click: two requests with the same key

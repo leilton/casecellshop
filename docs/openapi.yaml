@@ -8,7 +8,9 @@ info:
     - `GET /products` is served from a cache in front of a slow ERP. It may return a stale copy when the ERP is
       down (`meta.stale: true`, `x-cache: stale`).
     - `POST /checkout` reserves stock atomically and returns `202`; invoicing in the ERP happens asynchronously.
-      Poll `GET /orders/{orderId}/status` (the `Location` header) to follow it.
+      Poll `GET /orders/{orderId}/status` (the `Location` header) to follow it. Under peak load it may answer
+      `429` (per-client rate limit) or `503 OVERLOADED` (instance at capacity) with `Retry-After`: nothing was
+      reserved, so retry after that delay with the same `Idempotency-Key`.
     - Every response carries `x-correlation-id` (echoed when sent, generated otherwise). Quote it when reporting
       a problem: logs, traces and the ERP call for that request share it.
 servers:
@@ -62,6 +64,15 @@ paths:
       tags: [checkout]
       summary: Start a purchase (reserve stock, invoice asynchronously)
       operationId: checkout
+      description: |
+        Peak protection (in this order, all before any stock is touched):
+        1. **Rate limit per client IP** (`CHECKOUT_RATE_LIMIT_MAX` per `CHECKOUT_RATE_LIMIT_WINDOW_S`, counted in
+           Redis and shared by every instance) → `429 RATE_LIMITED`.
+        2. **Concurrency limit per instance** (`CHECKOUT_MAX_CONCURRENCY`) with a short FIFO wait queue
+           (`CHECKOUT_MAX_QUEUE`, `CHECKOUT_QUEUE_TIMEOUT_MS`) → `503 OVERLOADED` when the queue is full or the
+           wait times out.
+
+        Both carry `Retry-After` (seconds). Retrying with the same `Idempotency-Key` is always safe.
       parameters:
         - $ref: "#/components/parameters/CorrelationId"
         - name: Idempotency-Key
@@ -85,6 +96,9 @@ paths:
               description: Order status URL.
               schema: { type: string }
             x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CheckoutAccepted" }
@@ -125,8 +139,37 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: |
+            `RATE_LIMITED`: this client sent too many checkouts in the current window. Checked before the body is
+            read; nothing was reserved. Wait `Retry-After` seconds.
+          headers:
+            Retry-After: { $ref: "#/components/headers/RetryAfter" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: { code: RATE_LIMITED, message: "Too many checkout attempts, retry in 10 seconds" } }
         "500": { $ref: "#/components/responses/InternalError" }
-        "503": { $ref: "#/components/responses/Unavailable" }
+        "503":
+          description: |
+            `OVERLOADED`: this instance is at its checkout capacity and the wait queue is full or the wait timed
+            out; nothing was reserved, `details.retryAfterS` equals `Retry-After`. Also `CATALOG_UNAVAILABLE` or
+            `DEPENDENCY_UNAVAILABLE` (see the shared 503). Retry with the same `Idempotency-Key`.
+          headers:
+            Retry-After:
+              description: Seconds to wait. Present for `OVERLOADED`.
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error:
+                  code: OVERLOADED
+                  message: Checkout is at capacity, retry later with the same Idempotency-Key
+                  details: { retryAfterS: 1 }
 
   /orders/{orderId}/status:
     get:
@@ -212,6 +255,18 @@ components:
     CorrelationId:
       description: Correlation id of this request.
       schema: { type: string }
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema: { type: integer, minimum: 1 }
+    RateLimitLimit:
+      description: Checkouts allowed per client in the current window.
+      schema: { type: integer }
+    RateLimitRemaining:
+      description: Checkouts this client still has in the current window.
+      schema: { type: integer }
+    RateLimitReset:
+      description: Seconds until the window resets.
+      schema: { type: integer }
 
   responses:
     ValidationError:
@@ -408,6 +463,8 @@ components:
                 - IDEMPOTENCY_KEY_REUSED
                 - UNKNOWN_SKU
                 - CATALOG_UNAVAILABLE
+                - RATE_LIMITED
+                - OVERLOADED
                 - DEPENDENCY_UNAVAILABLE
                 - INTERNAL_ERROR
             message: { type: string }
