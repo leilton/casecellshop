@@ -195,6 +195,47 @@ paths:
         "500": { $ref: "#/components/responses/InternalError" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
+  /orders/{orderId}/cancel:
+    post:
+      tags: [orders]
+      summary: Cancel an order that is still reserved and give its stock back
+      description: |
+        Allowed only while the order is `RESERVED` (invoicing has not started). The reserved units return to
+        `available` in the same transaction. Idempotent by state: cancelling an order that is already `CANCELLED`
+        (by the customer or because its reservation expired) answers `200` again and releases nothing twice.
+        No body and no `Idempotency-Key` needed.
+      operationId: cancelOrder
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The order is `CANCELLED`; same body as `GET /orders/{orderId}/status`.
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderStatus" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            `ORDER_NOT_CANCELLABLE`: invoicing already started (`INVOICING`), finished (`INVOICED`) or failed
+            (`FAILED`). `details.status` is the current status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error:
+                  code: ORDER_NOT_CANCELLABLE
+                  message: Order is INVOICED and can no longer be cancelled
+                  details: { status: INVOICED }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
   /health:
     get:
       tags: [operations]
@@ -459,6 +500,7 @@ components:
                 - PRODUCT_NOT_FOUND
                 - ORDER_NOT_FOUND
                 - OUT_OF_STOCK
+                - ORDER_NOT_CANCELLABLE
                 - UNSUPPORTED_MEDIA_TYPE
                 - IDEMPOTENCY_KEY_REUSED
                 - UNKNOWN_SKU

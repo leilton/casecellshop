@@ -40,6 +40,12 @@ export const stockReservationConflicts = new client.Counter({
   labelNames: ['sku'] as const,
 });
 
+export const orderCancellations = new client.Counter({
+  name: 'order_cancellations_total',
+  help: 'Customer cancellation requests by outcome',
+  labelNames: ['outcome'] as const,
+});
+
 export const inventoryAvailable = new client.Gauge({
   name: 'inventory_available',
   help: 'Sellable units per SKU in the shop database',
@@ -73,6 +79,7 @@ export const orderProcessingDuration = new client.Histogram({
 });
 
 export type CheckoutOutcome = 'accepted' | 'out_of_stock' | 'duplicate' | 'invalid' | 'rate_limited' | 'shed';
+export type CancelOutcome = 'cancelled' | 'already_cancelled' | 'not_cancellable' | 'not_found';
 export type CacheResult = 'hit' | 'miss' | 'stale';
 export type ErpOutcome = 'success' | 'error' | 'timeout' | 'client_error';
 

@@ -45,7 +45,7 @@ async function main() {
     logger,
     reservationTtlS: cfg.RESERVATION_TTL_S,
   });
-  const orders = createOrdersService({ repo: createOrdersRepository(db) });
+  const orders = createOrdersService({ repo: createOrdersRepository(db), logger });
 
   async function check(fn: () => Promise<unknown>): Promise<string> {
     try {

@@ -55,6 +55,7 @@ curl localhost:3000/products
 curl -i localhost:3000/checkout -H 'content-type: application/json' -H 'Idempotency-Key: demo-1' \
   -d '{"items":[{"sku":"CASE-IPH15-BLK","quantity":1}]}'          # 202 + Location
 curl localhost:3000/orders/<orderId>/status                         # RESERVED → INVOICING → INVOICED
+curl -XPOST localhost:3000/orders/<orderId>/cancel                  # while RESERVED: CANCELLED, stock back
 ```
 
 | URL                                         | What                                     |
@@ -81,6 +82,7 @@ Swagger UI at http://localhost:3000/docs (with "Try it out", no download needed)
 | `GET /products[?sku=]`         | `200` (may be stale, `x-cache`) | `400`, `404`, `500`, `503`               |
 | `POST /checkout`               | `202 { orderId, status, statusUrl }` + `Location` | `400`, `409`, `415`, `422`, `429`, `500`, `503` |
 | `GET /orders/{orderId}/status` | `200` with history              | `400`, `404`, `500`, `503`               |
+| `POST /orders/{orderId}/cancel` | `200` `CANCELLED` (idempotent) | `400`, `404`, `409`, `500`, `503`        |
 
 Every error has the same shape and a stable `code`:
 
@@ -92,7 +94,7 @@ Every error has the same shape and a stable `code`:
 | ------ | --------------------------------------------------------------------------- |
 | 400    | `VALIDATION_ERROR`, `INVALID_JSON`, `MISSING_IDEMPOTENCY_KEY`, `INVALID_IDEMPOTENCY_KEY` |
 | 404    | `PRODUCT_NOT_FOUND`, `ORDER_NOT_FOUND`, `ROUTE_NOT_FOUND`                    |
-| 409    | `OUT_OF_STOCK` (nothing reserved)                                           |
+| 409    | `OUT_OF_STOCK` (nothing reserved), `ORDER_NOT_CANCELLABLE` (invoicing already started) |
 | 415    | `UNSUPPORTED_MEDIA_TYPE`                                                     |
 | 422    | `IDEMPOTENCY_KEY_REUSED` (same key, other items), `UNKNOWN_SKU`              |
 | 429    | `RATE_LIMITED` (per-client checkout budget; `Retry-After`, nothing reserved)  |
@@ -147,8 +149,14 @@ stateDiagram-v2
   INVOICING --> INVOICING: retry (lookup first)
   INVOICING --> INVOICED: invoice created or adopted
   INVOICING --> FAILED: DLQ, ERP 4xx — stock released
-  RESERVED --> CANCELLED: reservation expired — stock released
+  RESERVED --> CANCELLED: customer cancel or reservation expired — stock released
 ```
+
+**Cancellation.** `POST /orders/{orderId}/cancel` gives the stock back at once instead of waiting for the
+reservation to expire. It is allowed only while the order is `RESERVED`: it locks the order row, the same lock the
+worker takes before calling the ERP, so either the cancel wins and the worker later acks the message without
+invoicing, or the worker wins and the cancel gets `409 ORDER_NOT_CANCELLABLE`. Cancelling twice answers `200`
+both times and releases the units once ([ADR 0010](docs/adr/0010-customer-cancellation.md)).
 
 More detail: [`docs/architecture.md`](docs/architecture.md).
 
@@ -205,6 +213,7 @@ overload falls by 25–50%. Below capacity, the cap adds some queueing. Real cap
 | Lookup-before-retry + invoicing lease ([ADR 0007](docs/adr/0007-invoicing-lease-and-dlq-settlement.md)) | The ERP invoice endpoint is not idempotent | One extra ERP read per retry; a duplicate delivery waits up to the lease (15 s) |
 | Cache-aside with fresh/stale windows, single-flight, version sync ([ADR 0006](docs/adr/0006-storefront-cache.md)) | Latency and ERP load drop by orders of magnitude without a stampede | Prices can be up to one sync interval old (10 s); stale copies are flagged |
 | Rate limit per IP + per-instance concurrency cap with a short queue ([ADR 0009](docs/adr/0009-checkout-load-shedding.md)) | Bounded latency and a fast, retryable `429`/`503` instead of every request timing out together | Under overload useful throughput falls (rejections still cost CPU); users behind one NAT share a budget |
+| Cancel only while `RESERVED`, under the order row lock ([ADR 0010](docs/adr/0010-customer-cancellation.md)) | Stock returns immediately and the cancel can never race an ERP invoice | Once invoicing starts the customer needs a refund flow (out of scope) |
 | Displayed stock is advisory | The reservation is the real check; caching stock for 5 s is safe | A product may show "in stock" and then get `409` |
 | Traces exported only when a collector runs ([ADR 0008](docs/adr/0008-export-traces-only-with-a-collector.md)) | A missing collector starved DNS lookups and caused 2 s timeouts | `make up` alone has no trace UI (trace ids still appear in logs) |
 | ElasticMQ for SQS, CommonJS for OTel ([ADR 0002](docs/adr/0002-elasticmq-as-local-sqs.md), [0003](docs/adr/0003-commonjs-for-otel.md)) | Same AWS SDK code runs against AWS; auto-instrumentation needs CJS | — |
@@ -232,6 +241,7 @@ the worker's logs and the `x-correlation-id` header sent to the ERP. Payloads ar
 | `checkout_queue_depth` | gauge | `queue` = main/dlq |
 | `erp_requests_total` / `erp_request_duration_seconds` | counter / histogram | `operation`, `outcome` = success/error/timeout/client_error |
 | `order_processing_duration_seconds` | histogram | `final_status` = INVOICED/FAILED/CANCELLED |
+| `order_cancellations_total` | counter | `outcome` = cancelled/already_cancelled/not_cancellable/not_found |
 
 **Traces** — auto-instrumentation (HTTP, Fastify, pg, ioredis, AWS SDK) plus business spans: `cache.get`
 (`cache.result`), `stock.reserve`, `outbox.publish`, `order.process`, `erp.lookup`, `erp.invoice`,

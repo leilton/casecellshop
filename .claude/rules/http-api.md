@@ -17,6 +17,8 @@ paths:
     `409` out of stock; `422` same `Idempotency-Key` with a different payload; `429 RATE_LIMITED` per client
     IP and `503 OVERLOADED` at instance capacity, both with `Retry-After` and before any stock is touched.
   - `GET /orders/:id/status` → `200` / `404`.
+  - `POST /orders/:id/cancel` → `200` (also when already `CANCELLED`: idempotent by state); `404`;
+    `409 ORDER_NOT_CANCELLABLE` once invoicing started. Releases stock in the same transaction.
 - Errors are always `{ "error": { "code": "OUT_OF_STOCK", "message": "..." } }` via `AppError`.
 - Propagate `x-correlation-id` (generate one if absent) into logs, outbox payload and ERP calls.
 - Any route change must be reflected in `docs/openapi.yaml` in the same commit.

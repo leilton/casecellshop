@@ -211,6 +211,35 @@ const cases: Case[] = [
     status: 404,
     call: () => app.inject({ url: '/orders/2f1e0d9c-8b7a-4695-8473-625140302f1e/status' }),
   },
+  {
+    name: 'order cancel 200',
+    method: 'post',
+    specPath: '/orders/{orderId}/cancel',
+    status: 200,
+    call: async () => {
+      const placed = await app.inject({
+        method: 'POST',
+        url: '/checkout',
+        headers: { ...json, 'idempotency-key': uniqueId('c') },
+        payload: { items: [{ sku, quantity: 1 }] },
+      });
+      return app.inject({ method: 'POST', url: `/orders/${placed.json().orderId}/cancel` });
+    },
+  },
+  {
+    name: 'order cancel 400',
+    method: 'post',
+    specPath: '/orders/{orderId}/cancel',
+    status: 400,
+    call: () => app.inject({ method: 'POST', url: '/orders/not-a-uuid/cancel' }),
+  },
+  {
+    name: 'order cancel 404',
+    method: 'post',
+    specPath: '/orders/{orderId}/cancel',
+    status: 404,
+    call: () => app.inject({ method: 'POST', url: '/orders/2f1e0d9c-8b7a-4695-8473-625140302f1e/cancel' }),
+  },
   { name: 'health 200', method: 'get', specPath: '/health', status: 200, call: () => app.inject({ url: '/health' }) },
 ];
 

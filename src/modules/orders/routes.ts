@@ -13,4 +13,12 @@ export const ordersRoutes: FastifyPluginAsync<{ service: OrdersService }> = asyn
     reply.header('cache-control', 'no-store');
     return order;
   });
+
+  app.post('/orders/:id/cancel', async (req, reply) => {
+    const { id } = parseOrThrow(orderIdParamsSchema, req.params);
+    setContextOrderId(id);
+    const order = await service.cancel(id);
+    reply.header('cache-control', 'no-store');
+    return order;
+  });
 };

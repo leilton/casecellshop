@@ -329,6 +329,43 @@ describe('GET /orders/:id/status', () => {
   });
 });
 
+describe('POST /orders/:id/cancel', () => {
+  const cancel = (orderId: string) => app.inject({ method: 'POST', url: `/orders/${orderId}/cancel` });
+
+  it('200 CANCELLED, stock back on the shelf, and the same answer on a retry (no-store)', async () => {
+    const placed = (await checkout({ items: [{ sku, quantity: 2 }] })).json();
+
+    const first = await cancel(placed.orderId);
+    const second = await cancel(placed.orderId);
+
+    expect(first.statusCode).toBe(200);
+    expect(first.headers['cache-control']).toBe('no-store');
+    expect(first.json()).toMatchObject({ orderId: placed.orderId, status: 'CANCELLED' });
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toEqual(first.json());
+    expect(await fx.inventory(sku)).toEqual({ available: 5, reserved: 0 });
+  });
+
+  it('409 ORDER_NOT_CANCELLABLE once invoicing has started', async () => {
+    const placed = (await checkout({ items: [{ sku, quantity: 1 }] })).json();
+    await db.query(`UPDATE orders SET status = 'INVOICING' WHERE id = $1`, [placed.orderId]);
+
+    const res = await cancel(placed.orderId);
+
+    expectError(res, 409, 'ORDER_NOT_CANCELLABLE');
+    expect(res.json().error.details).toEqual({ status: 'INVOICING' });
+    expect(await fx.inventory(sku)).toEqual({ available: 4, reserved: 1 });
+  });
+
+  it('400 VALIDATION_ERROR for an id that is not a UUID', async () => {
+    expectError(await cancel('123'), 400, 'VALIDATION_ERROR');
+  });
+
+  it('404 ORDER_NOT_FOUND for an unknown UUID', async () => {
+    expectError(await cancel('2f1e0d9c-8b7a-4695-8473-625140302f1e'), 404, 'ORDER_NOT_FOUND');
+  });
+});
+
 describe('operational and unknown routes', () => {
   it('404 ROUTE_NOT_FOUND for an unknown path', async () => {
     expectError(await app.inject({ method: 'GET', url: '/nope' }), 404, 'ROUTE_NOT_FOUND');
