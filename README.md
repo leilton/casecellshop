@@ -54,7 +54,8 @@ curl localhost:3000/orders/<orderId>/status                         # RESERVED â
 
 | URL                                         | What                                     |
 | ------------------------------------------- | ---------------------------------------- |
-| http://localhost:3000/openapi.yaml          | API contract (also `docs/openapi.yaml`)  |
+| http://localhost:3000/docs                  | **Swagger UI**: read and try the API in the browser |
+| http://localhost:3000/openapi.yaml          | The contract as text (also `docs/openapi.yaml`)     |
 | http://localhost:3000/metrics               | API metrics (worker: `:9464/metrics`)    |
 | http://localhost:4000/admin/config          | ERP chaos (GET/POST)                     |
 | http://localhost:9325                       | Queue statistics (ElasticMQ)             |
@@ -67,7 +68,8 @@ after `make reset && make up`), `make reset` (wipe the database and re-seed), `m
 
 ## API
 
-Full contract with schemas and examples: [`docs/openapi.yaml`](docs/openapi.yaml).
+Full contract with schemas and examples: [`docs/openapi.yaml`](docs/openapi.yaml), also rendered as an interactive
+Swagger UI at http://localhost:3000/docs (with "Try it out", no download needed).
 
 | Route                          | Success                         | Errors                                   |
 | ------------------------------ | ------------------------------- | ---------------------------------------- |
